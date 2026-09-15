@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dos fotos apiladas, a trazo. Todo dentro de la zona segura (66dp). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:rotation="-10">
+        <path
+            android:pathData="M42,32h26a4,4 0,0 1,4 4v34a4,4 0,0 1,-4 4h-26a4,4 0,0 1,-4 -4v-34a4,4 0,0 1,4 -4z"
+            android:strokeColor="#80FFFFFF"
+            android:strokeWidth="3" />
+    </group>
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:rotation="6">
+        <path
+            android:pathData="M38,34h32a4,4 0,0 1,4 4v38a4,4 0,0 1,-4 4h-32a4,4 0,0 1,-4 -4v-38a4,4 0,0 1,4 -4z"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="4" />
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M45,48m-3.5,0a3.5,3.5 0 1,0 7,0a3.5,3.5 0 1,0 -7,0" />
+        <path
+            android:pathData="M38,70 L50,56 L58,65 L63,59 L74,70"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="4"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+    </group>
+</vector>
