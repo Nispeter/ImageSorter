@@ -5,10 +5,15 @@ $runId = New-RunId
 
 Write-Host '1) Enviar una foto a la papelera con la app'
 $s = Invoke-Step 'trashBeforeUninstall' @('-e', 'runId', $runId)
-$volume, $id = $s.key -split ':'
+if (-not ($s.key -match '^([\w-]+):(\d+)$') -or -not $s.path -or -not $s.sha) {
+    throw "El paso 1 no reportó la foto; no se desinstala nada"
+}
+$volume = $Matches[1]
+$id = $Matches[2]
 
 Write-Host '2) Desinstalar la app'
 adb uninstall com.imagesorter | Out-Host
+if ("$(adb shell pm path com.imagesorter)".Trim()) { throw 'La app sigue instalada: la desinstalación falló' }
 
 Write-Host '3) Comprobar desde el shell que la foto sigue en la papelera e intacta'
 $row = (adb shell content query --uri "content://media/$volume/images/media/$id" --projection is_trashed:_data) -join ' '

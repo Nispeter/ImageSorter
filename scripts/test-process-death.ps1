@@ -5,6 +5,7 @@ $runId = New-RunId
 
 Write-Host '1) Registrar decisiones (sin confirmar)'
 $s = Invoke-Step 'stageThenDie' @('-e', 'runId', $runId)
+if (-not $s.sha0 -or -not $s.sha1) { throw 'El paso 1 no reportó las fotos' }
 
 Write-Host '2) Matar el proceso de la app'
 adb shell am force-stop com.imagesorter
