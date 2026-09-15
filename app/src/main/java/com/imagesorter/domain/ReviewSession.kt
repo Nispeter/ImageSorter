@@ -11,10 +11,12 @@ import kotlinx.coroutines.withContext
 
 /**
  * Mazo de revisión. Solo registra decisiones: nunca toca archivos.
+ * @param attachedVolumes volúmenes conectados (memoria interna, tarjeta, USB).
  * @param lookup estado actual de una foto en MediaStore (null si ya no existe).
  */
 class ReviewSession(
     private val dao: DecisionDao,
+    private val attachedVolumes: () -> Set<String>,
     private val lookup: suspend (MediaKey) -> MediaItem?,
 ) {
     data class Undone(val decision: Decision, val backInDeck: Boolean)
@@ -46,13 +48,15 @@ class ReviewSession(
 
     /**
      * Deshace la última decisión aún no ejecutada y devuelve la foto al frente del mazo. Excepción: si
-     * era "borrar" y la foto ya está en la papelera (una confirmación anterior se interrumpió tras
-     * aplicarse), se marca como hecha para que siga visible en Papelera en vez de quedar oculta.
+     * una confirmación anterior se interrumpió después de aplicarla (la foto ya está en la papelera o
+     * ya se movió), se marca como hecha y la foto no vuelve al mazo, para no mostrar algo distinto de
+     * lo que pasó. Con la tarjeta/USB desconectado no se puede comprobar y se deshace normalmente.
      */
     suspend fun undo(): Undone? = withContext(NonCancellable) {
         mutex.withLock {
             val last = dao.latestStaged() ?: return@withLock null
-            if (last.action == Action.TRASH && lookup(last.key())?.isTrashed == true) {
+            val checkable = last.action != Action.KEEP && last.volume in attachedVolumes()
+            if (checkable && alreadyApplied(last, lookup(last.key()))) {
                 dao.markDone(last.volume, last.mediaId)
                 return@withLock Undone(last, backInDeck = false)
             }
@@ -61,5 +65,12 @@ class ReviewSession(
             _deck.value = listOf(item) + _deck.value.filterNot { it.key == item.key }
             Undone(last, backInDeck = true)
         }
+    }
+
+    private fun alreadyApplied(decision: Decision, now: MediaItem?): Boolean = when (decision.action) {
+        Action.TRASH -> now?.isTrashed == true
+        Action.FAVORITOS, Action.LIKED -> now != null && !now.isTrashed && now.size == decision.size &&
+            Folders.targetFor(decision.action).equals(now.relativePath, ignoreCase = true)
+        Action.KEEP -> false
     }
 }

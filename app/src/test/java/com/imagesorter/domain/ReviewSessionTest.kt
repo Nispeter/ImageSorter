@@ -15,8 +15,13 @@ import org.junit.Test
 
 class ReviewSessionTest {
     private val dao = FakeDecisionDao()
-    private val trashed = mutableSetOf<MediaKey>()
-    private val session = ReviewSession(dao) { key -> item(key.mediaId).copy(isTrashed = key in trashed) }
+    private var attached = setOf("external_primary")
+    private val remote = mutableMapOf<MediaKey, MediaItem>()
+    private var lookupFails = false
+    private val session = ReviewSession(dao, { attached }) { key ->
+        if (lookupFails) error("volumen no disponible")
+        remote[key] ?: item(key.mediaId)
+    }
 
     private fun deckIds() = session.deck.value.map { it.id }
 
@@ -139,12 +144,39 @@ class ReviewSessionTest {
     fun undo_ofATrashAlreadyApplied_marksDoneInsteadOfReturningToDeck() = runTest {
         session.load(listOf(item(1), item(2)))
         decideFront(Action.TRASH)
-        trashed += key(1) // una confirmación interrumpida ya la mandó a la papelera
+        remote[key(1)] = item(1).copy(isTrashed = true) // una confirmación interrumpida ya la mandó a la papelera
 
         val undone = session.undo()!!
 
         assertFalse(undone.backInDeck)
         assertEquals(Status.DONE, dao.rows.getValue(key(1)).status)
         assertEquals(listOf(2L), deckIds())
+    }
+
+    @Test
+    fun undo_ofAMoveAlreadyApplied_marksDoneInsteadOfReturningToDeck() = runTest {
+        session.load(listOf(item(1), item(2)))
+        decideFront(Action.FAVORITOS)
+        remote[key(1)] = item(1, name = "IMG_1 (1).jpg", path = Folders.FAVORITOS)
+
+        val undone = session.undo()!!
+
+        assertFalse(undone.backInDeck)
+        assertEquals(Status.DONE, dao.rows.getValue(key(1)).status)
+        assertEquals(listOf(2L), deckIds())
+    }
+
+    @Test
+    fun undo_onADisconnectedVolume_undoesNormallyWithoutQuerying() = runTest {
+        session.load(listOf(item(1), item(2)))
+        decideFront(Action.TRASH)
+        attached = emptySet()
+        lookupFails = true
+
+        val undone = session.undo()!!
+
+        assertTrue(undone.backInDeck)
+        assertTrue(dao.rows.isEmpty())
+        assertEquals(listOf(1L, 2L), deckIds())
     }
 }

@@ -1,5 +1,7 @@
 package com.imagesorter.ui
 
+import android.os.SystemClock
+import android.provider.MediaStore
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,6 +30,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -35,6 +39,7 @@ import com.imagesorter.data.MediaOps
 import com.imagesorter.data.MediaQueries
 import com.imagesorter.data.db.DecisionDao
 import com.imagesorter.domain.Action
+import com.imagesorter.domain.Folders
 import com.imagesorter.domain.MediaKey
 import com.imagesorter.domain.ReviewSession
 import kotlinx.coroutines.CancellationException
@@ -46,8 +51,11 @@ import kotlinx.coroutines.withContext
 @Composable
 fun DeckScreen(deck: Screen.Deck, queries: MediaQueries, ops: MediaOps, dao: DecisionDao, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
+    val context = LocalContext.current
     val session = remember(deck) {
-        ReviewSession(dao) { key -> withContext(Dispatchers.IO) { queries.snapshot(listOf(key))[key] } }
+        ReviewSession(dao, { MediaStore.getExternalVolumeNames(context) }) { key ->
+            withContext(Dispatchers.IO) { queries.snapshot(listOf(key))[key] }
+        }
     }
     val cards by session.deck.collectAsState()
     var loading by remember { mutableStateOf(true) }
@@ -81,8 +89,9 @@ fun DeckScreen(deck: Screen.Deck, queries: MediaQueries, ops: MediaOps, dao: Dec
             guarded {
                 val undone = session.undo()
                 if (undone != null && !undone.backInDeck) {
-                    message = "Aviso" to "\"${undone.decision.displayName}\" ya estaba en la papelera, así que no vuelve " +
-                        "al mazo. Puedes restaurarla desde Papelera."
+                    val where = Folders.targetFor(undone.decision.action)
+                        ?: "la papelera (puedes restaurarla desde Papelera)"
+                    message = "Aviso" to "\"${undone.decision.displayName}\" ya estaba en $where, así que no vuelve al mazo."
                 }
                 true
             }
@@ -103,15 +112,24 @@ fun DeckScreen(deck: Screen.Deck, queries: MediaQueries, ops: MediaOps, dao: Dec
         },
         bottomBar = {
             Column(Modifier.navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                // La foto que se está mostrando en este frame: los botones actúan SOLO sobre ella.
+                // La foto que se está mostrando en este frame: los botones actúan SOLO sobre ella, y solo
+                // después de que estuvo en pantalla lo que dura un doble toque (así el segundo toque de un
+                // doble toque no decide sobre la foto siguiente antes de que el usuario la vea).
                 val shown = cards.firstOrNull()?.takeIf { !loading }
+                val shownAt = remember(shown?.key) { SystemClock.uptimeMillis() }
+                val minVisibleMs = LocalViewConfiguration.current.doubleTapTimeoutMillis
+                fun act(action: Action) {
+                    val photo = shown ?: return
+                    if (SystemClock.uptimeMillis() - shownAt < minVisibleMs) return
+                    decide(action, photo.key)
+                }
                 val enabled = shown != null
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    ActionButton("🗑", "Borrar", enabled) { shown?.let { decide(Action.TRASH, it.key) } }
+                    ActionButton("🗑", "Borrar", enabled) { act(Action.TRASH) }
                     ActionButton("↶", "Deshacer") { undo() }
-                    ActionButton("⭐", "Favoritos", enabled) { shown?.let { decide(Action.FAVORITOS, it.key) } }
-                    ActionButton("❤️", "Liked", enabled) { shown?.let { decide(Action.LIKED, it.key) } }
-                    ActionButton("✓", "Conservar", enabled) { shown?.let { decide(Action.KEEP, it.key) } }
+                    ActionButton("⭐", "Favoritos", enabled) { act(Action.FAVORITOS) }
+                    ActionButton("❤️", "Liked", enabled) { act(Action.LIKED) }
+                    ActionButton("✓", "Conservar", enabled) { act(Action.KEEP) }
                 }
                 CommitBar(ops, dao, onFinished = { reload++ })
             }
