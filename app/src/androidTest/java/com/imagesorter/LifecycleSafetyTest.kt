@@ -38,7 +38,7 @@ class LifecycleSafetyTest {
         GrantPermissionRule.grant(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.ACCESS_MEDIA_LOCATION)
 
     private val args: Bundle = InstrumentationRegistry.getArguments()
-    private val fx = MediaFixture(args.getString("runId") ?: "IST_${System.currentTimeMillis()}")
+    private val fx = MediaFixture(args.getString("runId")?.takeUnless { it.isBlank() } ?: "IST_${System.currentTimeMillis()}")
     private val resolver = fx.context.contentResolver
     private val queries = MediaQueries(resolver)
     private val dir get() = "Pictures/${fx.runId}_L/"
@@ -86,6 +86,7 @@ class LifecycleSafetyTest {
         }
         report("sha0", photos[0].sha256)
         report("sha1", photos[1].sha256)
+        report("completed", "stageThenDie")
     }
 
     @Test
@@ -105,6 +106,7 @@ class LifecycleSafetyTest {
                 assertFalse("nada se envió a la papelera sin confirmar", row.isTrashed)
                 assertEquals(sha, fx.sha256(row.path))
             }
+            report("completed", "afterRestartQueuePersistsAndNothingExecuted")
         } finally {
             db.clearAllTables()
             fx.cleanup()
@@ -132,6 +134,7 @@ class LifecycleSafetyTest {
         report("key", "${photo.key.volume}:${photo.key.mediaId}")
         report("path", row.path)
         report("sha", photo.sha256)
+        report("completed", "trashBeforeUninstall")
     }
 
     @Test
@@ -152,6 +155,7 @@ class LifecycleSafetyTest {
             assertFalse(row.isTrashed)
             assertEquals(dir, row.relativePath)
             assertEquals(arg("sha"), fx.sha256(row.path))
+            report("completed", "restoreAfterReinstall")
         } finally {
             fx.cleanup()
             fx.setManageMedia(false)

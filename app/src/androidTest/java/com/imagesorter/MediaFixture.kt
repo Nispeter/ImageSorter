@@ -22,6 +22,11 @@ import java.security.MessageDigest
  * [cleanup] borra solo eso.
  */
 class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
+    init {
+        // cleanup() borra por este prefijo: un runId vacío o corto borraría fotos que no son de prueba.
+        require(Regex("IST_\\d{13}").matches(runId)) { "runId inválido: '$runId'" }
+    }
+
     val context: Context = ApplicationProvider.getApplicationContext()
     private val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
 

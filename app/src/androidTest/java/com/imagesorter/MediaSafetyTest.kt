@@ -98,7 +98,7 @@ class MediaSafetyTest {
 
     private fun attachedVolumes(): Set<String> = MediaStore.getExternalVolumeNames(fx.context)
 
-    private fun newSession() = ReviewSession(dao) { key -> queries.snapshot(listOf(key))[key] }
+    private fun newSession() = ReviewSession(dao, { attachedVolumes() }) { key -> queries.snapshot(listOf(key))[key] }
 
     private suspend fun ReviewSession.decideFront(action: Action) = decide(action, deck.value.first().key)
 
@@ -378,11 +378,13 @@ class MediaSafetyTest {
 
         val result = blocking { sabotaged.commitStaged() }
 
-        val done = doneKeys()
-        assertFalse("una foto inexistente nunca se da por hecha", vanishing.key in done)
-        val normalTrashed = checkNotNull(fx.row(normal.key)).isTrashed
-        assertEquals("DONE si y solo si está realmente en la papelera", normalTrashed, normal.key in done)
-        if (!result.cancelled) assertTrue(result.failures.any { it.displayName == vanishing.displayName })
+        // Con "Gestión de multimedia" el sistema aprueba siempre: el resultado es determinista.
+        assertFalse(result.cancelled)
+        assertEquals(1, result.done)
+        assertEquals("la desaparecida se informa", listOf(vanishing.displayName), result.failures.map { it.displayName })
+        assertTrashedIntact(normal)
+        assertEquals("solo la verificada queda hecha", setOf(normal.key), doneKeys())
+        assertFalse("la desaparecida no queda registrada", vanishing.key in blocking { dao.decidedKeys() })
     }
 
     // ---------- T13 ----------
