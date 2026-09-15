@@ -7,7 +7,10 @@ object CommitPlanner {
     /** Tamaño máximo de cada request a MediaStore (evita TransactionTooLargeException). */
     const val MAX_BATCH = 200
 
-    enum class SkipReason { MISSING, ALREADY_TRASHED, CHANGED, ALREADY_IN_TARGET }
+    enum class SkipReason { MISSING, ALREADY_TRASHED, CHANGED, ALREADY_IN_TARGET, NOT_MOVABLE }
+
+    /** Carpetas de otras apps (WhatsApp, Telegram…): Android nunca deja mover lo que hay ahí. */
+    private val OWNED_PATH = Regex("(?i)^Android/(data|media|obb)/")
 
     data class Skipped(val decision: Decision, val reason: SkipReason)
 
@@ -47,6 +50,7 @@ object CommitPlanner {
                 // Antes que CHANGED: un movimiento interrumpido deja la foto en destino (quizá renombrada).
                 target != null && target.equals(now.relativePath, ignoreCase = true) && now.size == d.size ->
                     SkipReason.ALREADY_IN_TARGET
+                target != null && OWNED_PATH.containsMatchIn(now.relativePath) -> SkipReason.NOT_MOVABLE
                 now.displayName != d.displayName || now.relativePath != d.relativePath ||
                     now.size != d.size || now.dateModified != d.dateModified -> SkipReason.CHANGED
                 else -> null

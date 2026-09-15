@@ -6,63 +6,67 @@ import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.MediaStore.Images
 import android.provider.MediaStore.MediaColumns
+import android.provider.MediaStore.Video
+import com.imagesorter.domain.FolderEntry
 import com.imagesorter.domain.MediaItem
 import com.imagesorter.domain.MediaKey
+import com.imagesorter.domain.MediaKind
 
-/** Consultas de SOLO LECTURA a MediaStore. Nunca filtra por owner_package_name (Android 14+ lo recorta a propias). */
+/**
+ * Consultas de SOLO LECTURA a MediaStore, sobre fotos y videos.
+ * Nunca filtra por owner_package_name (Android 14+ lo recorta a propias).
+ */
 class MediaQueries(private val resolver: ContentResolver) {
-    data class Folder(val bucketId: String, val name: String, val relativePath: String, val volume: String, val count: Int)
 
-    /** Carpetas con fotos (sin Favoritos/Liked), ordenadas por nombre. */
-    fun folders(): List<Folder> {
+    /** Un registro por foto o video (sin Favoritos/Liked) para armar el selector de carpetas. */
+    fun folderEntries(): List<FolderEntry> {
         val sel = SelectionBuilder.forDeck(null)
-        val byBucket = linkedMapOf<String, Folder>()
-        resolver.query(
-            COLLECTION,
-            arrayOf(Images.Media.BUCKET_ID, Images.Media.BUCKET_DISPLAY_NAME, MediaColumns.RELATIVE_PATH, MediaColumns.VOLUME_NAME),
-            sel.clause,
-            sel.args.toTypedArray(),
-            null,
-        )?.use { c ->
-            while (c.moveToNext()) {
-                val id = c.getString(0) ?: continue
-                val prev = byBucket[id]
-                byBucket[id] = prev?.copy(count = prev.count + 1)
-                    ?: Folder(id, c.getString(1) ?: "(sin nombre)", c.getString(2) ?: "", c.getString(3) ?: "", 1)
-            }
+        val out = ArrayList<FolderEntry>()
+        for (kind in MediaKind.entries) {
+            resolver.query(collection(kind, MediaStore.VOLUME_EXTERNAL), FOLDER_PROJECTION, sel.clause, sel.args.toTypedArray(), null)
+                ?.use { c ->
+                    while (c.moveToNext()) {
+                        val bucketId = c.getString(0) ?: continue
+                        out += FolderEntry(
+                            volume = c.getString(3) ?: "",
+                            bucketId = bucketId,
+                            name = c.getString(1) ?: "(sin nombre)",
+                            relativePath = c.getString(2) ?: "",
+                            dateAdded = c.getLong(4),
+                        )
+                    }
+                }
         }
-        return byBucket.values.sortedWith(compareBy({ it.name.lowercase() }, { it.relativePath }))
+        return out
     }
 
-    /** Fotos del mazo, más recientes primero. MediaStore excluye por defecto papelera y pendientes. */
+    /** Fotos y videos del mazo, más recientes primero. MediaStore excluye por defecto papelera y pendientes. */
     fun deck(bucketIds: Collection<String>?): List<MediaItem> {
         val sel = SelectionBuilder.forDeck(bucketIds)
-        return queryItems(COLLECTION, Bundle().apply {
-            putString(ContentResolver.QUERY_ARG_SQL_SELECTION, sel.clause)
-            putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, sel.args.toTypedArray())
-            // Sin fecha EXIF (WhatsApp, descargas) se usa la fecha del archivo.
-            putString(
-                ContentResolver.QUERY_ARG_SQL_SORT_ORDER,
-                "COALESCE(${MediaColumns.DATE_TAKEN}, ${MediaColumns.DATE_MODIFIED} * 1000) DESC, ${MediaColumns._ID} DESC",
-            )
-        })
+        return MediaKind.entries.flatMap { kind ->
+            queryItems(collection(kind, MediaStore.VOLUME_EXTERNAL), kind, Bundle().apply {
+                putString(ContentResolver.QUERY_ARG_SQL_SELECTION, sel.clause)
+                putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, sel.args.toTypedArray())
+            })
+        }.sortedWith(compareByDescending<MediaItem> { it.sortTime }.thenByDescending { it.id })
     }
 
-    /** Toda la papelera de imágenes del sistema (de cualquier app); primero las que vencen antes. */
-    fun trash(): List<MediaItem> = queryItems(COLLECTION, Bundle().apply {
-        putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_ONLY)
-        putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, "${MediaColumns.DATE_EXPIRES} ASC")
-    })
+    /** Toda la papelera de fotos y videos del sistema (de cualquier app); primero lo que vence antes. */
+    fun trash(): List<MediaItem> = MediaKind.entries.flatMap { kind ->
+        queryItems(collection(kind, MediaStore.VOLUME_EXTERNAL), kind, Bundle().apply {
+            putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_ONLY)
+        })
+    }.sortedBy { it.dateExpires ?: Long.MAX_VALUE }
 
     /**
-     * Estado actual (papelera incluida) de cada clave. Las fotos que ya no existen no están en el mapa.
+     * Estado actual (papelera incluida) de cada clave. Lo que ya no existe no está en el mapa.
      * Si MediaStore no responde lanza una excepción: una respuesta vacía nunca debe leerse como "no existe".
      */
     fun snapshot(keys: Collection<MediaKey>): Map<MediaKey, MediaItem> {
         val result = HashMap<MediaKey, MediaItem>()
         keys.groupBy { it.volume }.forEach { (volume, volumeKeys) ->
             volumeKeys.chunked(500).forEach { chunk ->
-                queryItems(Images.Media.getContentUri(volume), Bundle().apply {
+                val args = Bundle().apply {
                     putString(
                         ContentResolver.QUERY_ARG_SQL_SELECTION,
                         "${MediaColumns._ID} IN (${chunk.joinToString(",") { "?" }})",
@@ -72,13 +76,16 @@ class MediaQueries(private val resolver: ContentResolver) {
                         chunk.map { it.mediaId.toString() }.toTypedArray(),
                     )
                     putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE)
-                }, requireCursor = true).forEach { result[it.key] = it }
+                }
+                for (kind in MediaKind.entries) {
+                    queryItems(collection(kind, volume), kind, args, requireCursor = true).forEach { result[it.key] = it }
+                }
             }
         }
         return result
     }
 
-    private fun queryItems(uri: Uri, args: Bundle, requireCursor: Boolean = false): List<MediaItem> {
+    private fun queryItems(uri: Uri, kind: MediaKind, args: Bundle, requireCursor: Boolean = false): List<MediaItem> {
         val cursor = resolver.query(uri, PROJECTION, args, null)
             ?: if (requireCursor) throw IllegalStateException("MediaStore no respondió. Vuelve a intentarlo.") else return emptyList()
         val out = ArrayList<MediaItem>()
@@ -91,6 +98,9 @@ class MediaQueries(private val resolver: ContentResolver) {
             val modified = c.getColumnIndexOrThrow(MediaColumns.DATE_MODIFIED)
             val trashed = c.getColumnIndexOrThrow(MediaColumns.IS_TRASHED)
             val expires = c.getColumnIndexOrThrow(MediaColumns.DATE_EXPIRES)
+            val bucket = c.getColumnIndexOrThrow(MediaColumns.BUCKET_ID)
+            val added = c.getColumnIndexOrThrow(MediaColumns.DATE_ADDED)
+            val taken = c.getColumnIndexOrThrow(MediaColumns.DATE_TAKEN)
             while (c.moveToNext()) {
                 out += MediaItem(
                     volume = c.getString(volume),
@@ -101,6 +111,10 @@ class MediaQueries(private val resolver: ContentResolver) {
                     dateModified = c.getLong(modified),
                     isTrashed = c.getInt(trashed) == 1,
                     dateExpires = if (c.isNull(expires)) null else c.getLong(expires),
+                    kind = kind,
+                    bucketId = c.getString(bucket) ?: "",
+                    dateAdded = c.getLong(added),
+                    dateTaken = if (c.isNull(taken)) null else c.getLong(taken),
                 )
             }
         }
@@ -108,7 +122,18 @@ class MediaQueries(private val resolver: ContentResolver) {
     }
 
     companion object {
-        val COLLECTION: Uri = Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        fun collection(kind: MediaKind, volume: String): Uri = when (kind) {
+            MediaKind.IMAGE -> Images.Media.getContentUri(volume)
+            MediaKind.VIDEO -> Video.Media.getContentUri(volume)
+        }
+
+        private val FOLDER_PROJECTION = arrayOf(
+            MediaColumns.BUCKET_ID,
+            MediaColumns.BUCKET_DISPLAY_NAME,
+            MediaColumns.RELATIVE_PATH,
+            MediaColumns.VOLUME_NAME,
+            MediaColumns.DATE_ADDED,
+        )
 
         private val PROJECTION = arrayOf(
             MediaColumns._ID,
@@ -119,6 +144,9 @@ class MediaQueries(private val resolver: ContentResolver) {
             MediaColumns.DATE_MODIFIED,
             MediaColumns.IS_TRASHED,
             MediaColumns.DATE_EXPIRES,
+            MediaColumns.BUCKET_ID,
+            MediaColumns.DATE_ADDED,
+            MediaColumns.DATE_TAKEN,
         )
     }
 }

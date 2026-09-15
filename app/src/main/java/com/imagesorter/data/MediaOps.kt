@@ -14,18 +14,20 @@ import com.imagesorter.domain.CommitPlanner.SkipReason
 import com.imagesorter.domain.Folders
 import com.imagesorter.domain.MediaItem
 import com.imagesorter.domain.MediaKey
+import com.imagesorter.domain.MediaKind
 import com.imagesorter.domain.Verifier
 import com.imagesorter.domain.Verifier.Outcome
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * ÚNICA clase que modifica fotos. Cada operación:
+ * ÚNICA clase que modifica fotos y videos. Cada operación:
  *  1. pide aprobación al sistema (sin diálogo si la app tiene "Gestión de multimedia"),
- *  2. vuelve a leer cada foto y solo da por hecho lo verificado: el sistema devuelve OK aunque
+ *  2. vuelve a leer cada archivo y solo da por hecho lo verificado: el sistema devuelve OK aunque
  *     algún ítem falle.
  * Si el usuario cancela, no se sigue con más lotes y lo no verificado queda como estaba.
- * Las fotos de volúmenes desconectados (tarjeta, USB) no se tocan ni se dan por inexistentes.
+ * Lo de volúmenes desconectados (tarjeta, USB) no se toca ni se da por inexistente.
+ * Cada lote contiene un solo tipo (fotos o videos).
  */
 class MediaOps(
     private val resolver: ContentResolver,
@@ -63,15 +65,15 @@ class MediaOps(
             }
         }
 
-        for (batch in CommitPlanner.batches(plan.trash)) {
-            val approved = approve(MediaStore.createTrashRequest(resolver, batch.map { uriOf(it.key()) }, true))
+        for (batch in batchesByKind(plan.trash) { it.kind }) {
+            val approved = approve(MediaStore.createTrashRequest(resolver, batch.map { uriOf(it.key(), it.kind) }, true))
             done += settle(batch, approved, failures, emptyMap()) { _, now -> Verifier.trashed(now) }
             if (!approved) return OpResult(done, failures, cancelled = true)
         }
 
         for ((target, decisions) in listOf(Folders.FAVORITOS to plan.favoritos, Folders.LIKED to plan.liked)) {
-            for (batch in CommitPlanner.batches(decisions)) {
-                val approved = approve(MediaStore.createWriteRequest(resolver, batch.map { uriOf(it.key()) }))
+            for (batch in batchesByKind(decisions) { it.kind }) {
+                val approved = approve(MediaStore.createWriteRequest(resolver, batch.map { uriOf(it.key(), it.kind) }))
                 val errors = HashMap<MediaKey, String>()
                 if (approved) {
                     // El permiso de escritura vive con la Activity: mover inmediatamente.
@@ -79,7 +81,7 @@ class MediaOps(
                         val values = ContentValues().apply { put(MediaColumns.RELATIVE_PATH, target) }
                         for (d in batch) {
                             try {
-                                resolver.update(uriOf(d.key()), values, null, null)
+                                resolver.update(uriOf(d.key(), d.kind), values, null, null)
                             } catch (e: Exception) {
                                 errors[d.key()] = e.message ?: e.javaClass.simpleName
                             }
@@ -95,12 +97,13 @@ class MediaOps(
         return OpResult(done + plan.keep.size, failures, cancelled = false)
     }
 
-    /** Saca fotos de la papelera. Vuelven a su carpeta (el nombre puede recibir " (1)"). */
+    /** Saca fotos y videos de la papelera. Vuelven a su carpeta (el nombre puede recibir " (1)"). */
     suspend fun restore(items: List<MediaItem>): OpResult {
         val failures = mutableListOf<Failure>()
         var done = 0
-        for (batch in CommitPlanner.batches(onAttachedVolumes(items, failures, { it.volume }, { it.displayName }))) {
-            val approved = approve(MediaStore.createTrashRequest(resolver, batch.map { uriOf(it.key) }, false))
+        val available = onAttachedVolumes(items, failures, { it.volume }, { it.displayName })
+        for (batch in batchesByKind(available) { it.kind }) {
+            val approved = approve(MediaStore.createTrashRequest(resolver, batch.map { uriOf(it) }, false))
             val now = io { queries.snapshot(batch.map { it.key }) }
             for (item in batch) {
                 when (val outcome = Verifier.restored(now[item.key])) {
@@ -118,7 +121,7 @@ class MediaOps(
 
     /**
      * BORRADO DEFINITIVO. Solo desde la pantalla Papelera, tras confirmación del usuario.
-     * Justo antes vuelve a comprobar que cada foto sigue en la papelera; las demás no se tocan.
+     * Justo antes vuelve a comprobar que cada archivo sigue en la papelera; los demás no se tocan.
      */
     suspend fun deleteForever(items: List<MediaItem>): OpResult {
         val failures = mutableListOf<Failure>()
@@ -130,8 +133,8 @@ class MediaOps(
             inTrash
         }
         var done = 0
-        for (batch in CommitPlanner.batches(eligible)) {
-            val approved = approve(MediaStore.createDeleteRequest(resolver, batch.map { uriOf(it.key) }))
+        for (batch in batchesByKind(eligible) { it.kind }) {
+            val approved = approve(MediaStore.createDeleteRequest(resolver, batch.map { uriOf(it) }))
             val now = io { queries.snapshot(batch.map { it.key }) }
             for (item in batch) {
                 when (val outcome = Verifier.deleted(now[item.key])) {
@@ -190,16 +193,25 @@ class MediaOps(
         }
     }
 
+    private fun <T> batchesByKind(items: List<T>, kind: (T) -> MediaKind): List<List<T>> =
+        items.groupBy(kind).values.flatMap { CommitPlanner.batches(it) }
+
     private fun skipText(reason: SkipReason) = when (reason) {
         SkipReason.MISSING -> "ya no existe"
         SkipReason.ALREADY_TRASHED -> "está en la papelera"
         SkipReason.CHANGED -> "cambió desde que la revisaste"
         SkipReason.ALREADY_IN_TARGET -> "ya estaba en la carpeta"
+        SkipReason.NOT_MOVABLE -> "Android no deja mover archivos de otras apps (WhatsApp, etc.); sí puedes borrarlos"
     }
 
     private suspend fun <T> io(block: () -> T): T = withContext(Dispatchers.IO) { block() }
 
     companion object {
-        fun uriOf(key: MediaKey): Uri = MediaStore.Images.Media.getContentUri(key.volume, key.mediaId)
+        fun uriOf(key: MediaKey, kind: MediaKind): Uri = when (kind) {
+            MediaKind.IMAGE -> MediaStore.Images.Media.getContentUri(key.volume, key.mediaId)
+            MediaKind.VIDEO -> MediaStore.Video.Media.getContentUri(key.volume, key.mediaId)
+        }
+
+        fun uriOf(item: MediaItem): Uri = uriOf(item.key, item.kind)
     }
 }

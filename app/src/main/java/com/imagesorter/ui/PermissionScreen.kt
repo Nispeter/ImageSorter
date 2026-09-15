@@ -38,7 +38,7 @@ object Permissions {
         fun granted(permission: String) =
             ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
         val full = if (Build.VERSION.SDK_INT >= 33) {
-            granted(Manifest.permission.READ_MEDIA_IMAGES)
+            granted(Manifest.permission.READ_MEDIA_IMAGES) && granted(Manifest.permission.READ_MEDIA_VIDEO)
         } else {
             granted(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
@@ -48,7 +48,12 @@ object Permissions {
     }
 
     fun runtimeRequest(): Array<String> = buildList {
-        if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.READ_MEDIA_IMAGES) else add(Manifest.permission.READ_EXTERNAL_STORAGE)
+        if (Build.VERSION.SDK_INT >= 33) {
+            add(Manifest.permission.READ_MEDIA_IMAGES)
+            add(Manifest.permission.READ_MEDIA_VIDEO)
+        } else {
+            add(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
         if (Build.VERSION.SDK_INT >= 34) add(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
         add(Manifest.permission.ACCESS_MEDIA_LOCATION)
     }.toTypedArray()
@@ -69,8 +74,8 @@ fun PermissionScreen(status: Permissions.Status, onResult: () -> Unit) {
         Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
     ) {
-        Text("ImageSorter necesita acceso a tus fotos", style = MaterialTheme.typography.headlineSmall)
-        Text("Permite el acceso a TODAS las fotos para revisarlas. Nada se mueve ni se borra hasta que pulses Confirmar.")
+        Text("ImageSorter necesita acceso a tus fotos y videos", style = MaterialTheme.typography.headlineSmall)
+        Text("Permite el acceso a TODAS las fotos y videos para revisarlos. Nada se mueve ni se borra hasta que pulses Confirmar.")
         if (status.partialRead) {
             Text(
                 "Diste acceso solo a algunas fotos: la app vería tu galería incompleta. Elige \"Permitir todo\".",

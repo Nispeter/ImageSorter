@@ -15,13 +15,17 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -48,6 +52,7 @@ import com.imagesorter.data.MediaOps
 import com.imagesorter.data.MediaQueries
 import com.imagesorter.domain.MediaItem
 import com.imagesorter.domain.MediaKey
+import com.imagesorter.domain.MediaKind
 import com.imagesorter.domain.Verifier
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -129,8 +134,8 @@ fun TrashScreen(queries: MediaQueries, ops: MediaOps, onBack: () -> Unit) {
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             Text(
-                "Android borra cada foto de la papelera cuando vence su plazo (~30 días desde que se envió). " +
-                    "Si desinstalas la app, las fotos siguen en la papelera del sistema hasta que venzan.",
+                "Android borra cada foto o video de la papelera cuando vence su plazo (~30 días desde que se envió). " +
+                    "Si desinstalas la app, siguen en la papelera del sistema hasta que venzan.",
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
@@ -161,7 +166,7 @@ fun TrashScreen(queries: MediaQueries, ops: MediaOps, onBack: () -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmDelete = null },
             title = { Text("¿Borrar para siempre?") },
-            text = { Text("Se borrarán definitivamente ${toDelete.size} fotos. Esto NO se puede deshacer.") },
+            text = { Text("Se borrarán definitivamente ${toDelete.size} fotos o videos. Esto NO se puede deshacer.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDelete = null
@@ -185,11 +190,22 @@ private fun TrashCell(item: MediaItem, checked: Boolean, daysLeft: Int?, onToggl
             .toggleable(value = checked, role = Role.Checkbox, onValueChange = onToggle),
     ) {
         AsyncImage(
-            model = MediaOps.uriOf(item.key),
+            model = MediaOps.uriOf(item),
             contentDescription = item.displayName,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
         )
+        if (item.kind == MediaKind.VIDEO) {
+            Icon(
+                Icons.Filled.PlayArrow,
+                contentDescription = "Video",
+                tint = Color.White,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                    .padding(4.dp),
+            )
+        }
         Checkbox(checked = checked, onCheckedChange = null, modifier = Modifier.align(Alignment.TopEnd))
         if (daysLeft != null) {
             Text(

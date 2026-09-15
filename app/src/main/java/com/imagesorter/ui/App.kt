@@ -10,6 +10,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.imagesorter.data.MediaOps
 import com.imagesorter.data.MediaQueries
+import com.imagesorter.data.db.ArchiveDao
 import com.imagesorter.data.db.DecisionDao
 
 sealed interface Screen {
@@ -19,7 +20,7 @@ sealed interface Screen {
 }
 
 @Composable
-fun App(queries: MediaQueries, ops: MediaOps, dao: DecisionDao) {
+fun App(queries: MediaQueries, ops: MediaOps, dao: DecisionDao, archiveDao: ArchiveDao) {
     val context = LocalContext.current
     var access by remember { mutableStateOf(Permissions.status(context)) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { access = Permissions.status(context) }
@@ -35,11 +36,12 @@ fun App(queries: MediaQueries, ops: MediaOps, dao: DecisionDao) {
             queries = queries,
             ops = ops,
             dao = dao,
+            archiveDao = archiveDao,
             access = access,
             onOpenDeck = { screen = it },
             onOpenTrash = { screen = Screen.Trash },
         )
-        is Screen.Deck -> DeckScreen(s, queries, ops, dao, onBack = { screen = Screen.Folders })
+        is Screen.Deck -> DeckScreen(s, queries, ops, dao, archiveDao, onBack = { screen = Screen.Folders })
         Screen.Trash -> TrashScreen(queries, ops, onBack = { screen = Screen.Folders })
     }
 }

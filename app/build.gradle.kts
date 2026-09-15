@@ -13,8 +13,8 @@ android {
         applicationId = "com.imagesorter"
         minSdk = 31
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -50,6 +50,7 @@ dependencies {
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
     implementation(libs.coil.compose)
+    implementation(libs.coil.video)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

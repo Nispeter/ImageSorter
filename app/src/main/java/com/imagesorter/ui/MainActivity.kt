@@ -20,19 +20,19 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        val dao = AppDatabase.get(this).decisions()
+        val db = AppDatabase.get(this)
         val queries = MediaQueries(contentResolver)
         val ops = MediaOps(
             resolver = contentResolver,
             queries = queries,
-            dao = dao,
+            dao = db.decisions(),
             attachedVolumes = { MediaStore.getExternalVolumeNames(this) },
             approve = approvals::approve,
         )
         setContent {
             MaterialTheme {
                 Surface(Modifier.fillMaxSize()) {
-                    App(queries, ops, dao)
+                    App(queries, ops, db.decisions(), db.archive())
                 }
             }
         }
