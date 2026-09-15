@@ -84,6 +84,26 @@ class CommitPlannerTest {
     }
 
     @Test
+    fun movingFilesFromAnotherAppsFolder_isSkippedBeforeTrying() {
+        val whatsapp = item(1, path = "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video/")
+        val decision = Decision.staged(whatsapp, Action.FAVORITOS, 1)
+
+        val plan = CommitPlanner.plan(listOf(decision), current(whatsapp))
+
+        assertTrue(plan.favoritos.isEmpty())
+        assertEquals(SkipReason.NOT_MOVABLE, plan.skipped.single().reason)
+    }
+
+    @Test
+    fun trashingFilesFromAnotherAppsFolder_isAllowed() {
+        val whatsapp = item(1, path = "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video/")
+        val plan = CommitPlanner.plan(listOf(Decision.staged(whatsapp, Action.TRASH, 1)), current(whatsapp))
+
+        assertEquals(listOf(1L), plan.trash.map { it.mediaId })
+        assertTrue(plan.skipped.isEmpty())
+    }
+
+    @Test
     fun keepOfAPhotoInTheTrash_isSkipped() {
         val plan = CommitPlanner.plan(listOf(staged(1, Action.KEEP)), current(item(1).copy(isTrashed = true)))
         assertTrue(plan.keep.isEmpty())

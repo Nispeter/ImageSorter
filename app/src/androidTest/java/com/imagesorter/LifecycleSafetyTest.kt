@@ -35,7 +35,11 @@ import org.junit.runner.RunWith
 class LifecycleSafetyTest {
     @get:Rule
     val permissions: GrantPermissionRule =
-        GrantPermissionRule.grant(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.ACCESS_MEDIA_LOCATION)
+        GrantPermissionRule.grant(
+            Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.READ_MEDIA_VIDEO,
+            Manifest.permission.ACCESS_MEDIA_LOCATION,
+        )
 
     private val args: Bundle = InstrumentationRegistry.getArguments()
     private val fx = MediaFixture(args.getString("runId")?.takeUnless { it.isBlank() } ?: "IST_${System.currentTimeMillis()}")

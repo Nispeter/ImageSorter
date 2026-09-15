@@ -11,7 +11,9 @@ import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.platform.app.InstrumentationRegistry
+import com.imagesorter.data.MediaQueries
 import com.imagesorter.domain.MediaKey
+import com.imagesorter.domain.MediaKind
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 
@@ -80,8 +82,13 @@ class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
     }
 
     /** Crea la foto y espera a que MediaStore la indexe con su tamaño final. */
+    private fun isVideo(name: String) = name.endsWith(".mp4")
+
+    /** Bytes distintos por [variant] con extensión .mp4: MediaStore lo indexa como video aunque no se reproduzca. */
+    fun fakeVideo(variant: Int): ByteArray = ByteArray(4096) { ((it * 31) xor variant).toByte() }
+
     fun seed(relativePath: String, name: String, variant: Int): Seeded {
-        val bytes = jpeg(variant)
+        val bytes = if (isVideo(name)) fakeVideo(variant) else jpeg(variant)
         val path = "/storage/emulated/0/$relativePath$name"
         writeViaShell(path, bytes)
         scan(path)
@@ -99,7 +106,7 @@ class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
             putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, arrayOf(relativePath, name))
         }
         context.contentResolver.query(
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL),
+            MediaQueries.collection(if (isVideo(name)) MediaKind.VIDEO else MediaKind.IMAGE, MediaStore.VOLUME_EXTERNAL),
             arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.VOLUME_NAME),
             args,
             null,
@@ -109,14 +116,17 @@ class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
 
     /** Estado de la fila leído por el shell (incluye papelera). null si ya no existe. */
     fun row(key: MediaKey): Row? {
-        val out = sh(
-            "content query --uri content://media/${key.volume}/images/media/${key.mediaId} " +
-                "--projection _data:_display_name:relative_path:is_trashed:date_expires:owner_package_name:_size",
-        )
-        val line = out.lineSequence().firstOrNull { it.startsWith("Row:") } ?: return null
-        val body = line.substringAfter("Row:").trim().substringAfter(' ')
-        val values = Regex("""(\w+)=(.*?)(?=, \w+=|$)""").findAll(body).associate { it.groupValues[1] to it.groupValues[2] }
-        return Row(values)
+        for (collection in listOf("images", "video")) {
+            val out = sh(
+                "content query --uri content://media/${key.volume}/$collection/media/${key.mediaId} " +
+                    "--projection _data:_display_name:relative_path:is_trashed:date_expires:owner_package_name:_size",
+            )
+            val line = out.lineSequence().firstOrNull { it.startsWith("Row:") } ?: continue
+            val body = line.substringAfter("Row:").trim().substringAfter(' ')
+            val values = Regex("""(\w+)=(.*?)(?=, \w+=|$)""").findAll(body).associate { it.groupValues[1] to it.groupValues[2] }
+            return Row(values)
+        }
+        return null
     }
 
     /** SHA-256 calculado por el shell; null si el archivo no existe. Soporta nombres con espacios. */
@@ -138,8 +148,10 @@ class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
 
     /** Borra SOLO lo creado por este test (nombres con [runId]), incluidas copias en papelera y movidas. */
     fun cleanup() {
-        val roots = "/storage/emulated/0/Pictures /storage/emulated/0/DCIM"
+        val whatsapp = "/storage/emulated/0/Android/media/com.whatsapp"
+        val roots = "/storage/emulated/0/Pictures /storage/emulated/0/DCIM /storage/emulated/0/Movies $whatsapp"
         sh("find $roots -type f -name *$runId* -delete")
         sh("find $roots -depth -type d -name $runId* -empty -delete")
+        sh("find $whatsapp -depth -type d -empty -delete")
     }
 }

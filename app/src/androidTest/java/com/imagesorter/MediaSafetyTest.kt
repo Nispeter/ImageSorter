@@ -16,7 +16,11 @@ import com.imagesorter.data.db.AppDatabase
 import com.imagesorter.data.db.Decision
 import com.imagesorter.data.db.DecisionDao
 import com.imagesorter.domain.Action
+import android.util.Log
+import com.imagesorter.data.db.ArchivedFolder
+import com.imagesorter.domain.FolderIndex
 import com.imagesorter.domain.Folders
+import com.imagesorter.domain.MediaKind
 import com.imagesorter.domain.ReviewSession
 import com.imagesorter.domain.Status
 import com.imagesorter.ui.ApprovalLauncher
@@ -45,7 +49,11 @@ import org.junit.runner.RunWith
 class MediaSafetyTest {
     @get:Rule
     val permissions: GrantPermissionRule =
-        GrantPermissionRule.grant(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.ACCESS_MEDIA_LOCATION)
+        GrantPermissionRule.grant(
+            Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.READ_MEDIA_VIDEO,
+            Manifest.permission.ACCESS_MEDIA_LOCATION,
+        )
 
     private val fx = MediaFixture()
     private val resolver = fx.context.contentResolver
@@ -87,7 +95,9 @@ class MediaSafetyTest {
     private fun seed(dir: String, count: Int, from: Int = 0) =
         (from until from + count).map { fx.seed(dir, "${fx.runId}_$it.jpg", variant = it) }
 
-    private fun bucketOf(dir: String) = queries.folders().single { it.name == dir.trimEnd('/').substringAfterLast('/') }.bucketId
+    private fun folders() = FolderIndex.build(queries.folderEntries(), emptyList()).visible
+
+    private fun bucketOf(dir: String) = folders().single { it.name == dir.trimEnd('/').substringAfterLast('/') }.bucketId
 
     private fun stage(s: MediaFixture.Seeded, action: Action) = blocking {
         val item = queries.snapshot(listOf(s.key)).getValue(s.key)
@@ -134,7 +144,7 @@ class MediaSafetyTest {
         val fav = fx.seed(Folders.FAVORITOS, "${fx.runId}_fav.jpg", variant = 20)
         val liked = fx.seed(Folders.LIKED, "${fx.runId}_liked.jpg", variant = 21)
 
-        val folders = queries.folders()
+        val folders = folders()
         val bucketA = folders.single { it.name == "${fx.runId}_A" }
         val bucketB = folders.single { it.name == "${fx.runId}_B" }
         assertEquals(3, bucketA.count)
@@ -512,5 +522,85 @@ class MediaSafetyTest {
         assertTrue(session.deck.value.isEmpty())
         assertEquals(setOf(photo.key), doneKeys())
         assertTrue("sigue visible en Papelera", queries.trash().any { it.key == photo.key })
+    }
+
+    // ---------- Videos, WhatsApp y carpetas archivadas ----------
+
+    @Test
+    fun videos_areListedTrashedRestoredAndMovedLikePhotos() {
+        val dirV = "Movies/${fx.runId}_V/"
+        val toTrash = fx.seed(dirV, "${fx.runId}_v1.mp4", variant = 1)
+        val toFav = fx.seed(dirV, "${fx.runId}_v2.mp4", variant = 2)
+        val folder = folders().single { it.name == "${fx.runId}_V" }
+        assertEquals(2, folder.count)
+        val deck = queries.deck(listOf(folder.bucketId))
+        assertEquals(setOf(toTrash.key, toFav.key), deck.map { it.key }.toSet())
+        assertTrue(deck.all { it.kind == MediaKind.VIDEO })
+        stage(toTrash, Action.TRASH)
+        stage(toFav, Action.FAVORITOS)
+
+        val result = blocking { ops.commitStaged() }
+
+        assertEquals(MediaOps.OpResult(2, emptyList(), cancelled = false), result)
+        assertTrashedIntact(toTrash)
+        assertMoved(toFav, Folders.FAVORITOS)
+        val trashed = queries.trash().filter { it.key == toTrash.key }
+        assertEquals(MediaKind.VIDEO, trashed.single().kind)
+        assertEquals(MediaOps.OpResult(1, emptyList(), cancelled = false), blocking { ops.restore(trashed) })
+        assertUntouched(toTrash)
+    }
+
+    @Test
+    fun whatsappFiles_alwaysEndInATrueState() {
+        val dirW = "Android/media/com.whatsapp/WhatsApp/Media/${fx.runId}_WA/"
+        val photo = fx.seed(dirW, "${fx.runId}_w1.jpg", variant = 1)
+        val video = fx.seed(dirW, "${fx.runId}_w2.mp4", variant = 2)
+        assertTrue("la carpeta de WhatsApp aparece", folders().any { it.name == "${fx.runId}_WA" && it.count == 2 })
+        stage(photo, Action.TRASH)
+        stage(video, Action.FAVORITOS)
+
+        val result = blocking { ops.commitStaged() }
+
+        Log.i("ImageSorterTest", "WhatsApp result=$result photo=${fx.row(photo.key)?.values} video=${fx.row(video.key)?.values}")
+        val done = doneKeys()
+        val failed = result.failures.map { it.displayName }.toSet()
+        // Cada archivo termina hecho y verificado, o informado y sin tocar. Nunca otra cosa.
+        if (photo.key in done) {
+            assertTrashedIntact(photo)
+        } else {
+            assertTrue("el fallo se informa", photo.displayName in failed)
+            assertUntouched(photo)
+        }
+        if (video.key in done) {
+            assertMoved(video, Folders.FAVORITOS)
+        } else {
+            assertTrue("el fallo se informa", video.displayName in failed)
+            assertUntouched(video)
+        }
+    }
+
+    @Test
+    fun archivedFolder_hidesWhatWasThere_andReappearsOnlyWithNewFiles() {
+        val (old1, old2) = seed(dirA, 2)
+        val name = "${fx.runId}_A"
+        val before = folders().single { it.name == name }
+        val archive = ArchivedFolder(before.volume, before.bucketId, before.latestAdded, before.name, before.relativePath)
+
+        val archivedIndex = FolderIndex.build(queries.folderEntries(), listOf(archive))
+        assertTrue(archivedIndex.visible.none { it.name == name })
+        assertTrue(archivedIndex.archived.any { it.name == name })
+        val allVisible = queries.deck(null).filter { FolderIndex.isVisible(it, listOf(archive)) }.map { it.key }
+        assertFalse(old1.key in allVisible || old2.key in allVisible)
+
+        Thread.sleep(1_100) // date_added tiene resolución de segundos
+        val fresh = fx.seed(dirA, "${fx.runId}_new.jpg", variant = 9)
+
+        val reappeared = FolderIndex.build(queries.folderEntries(), listOf(archive)).visible.single { it.name == name }
+        assertTrue(reappeared.hasNew)
+        assertEquals(1, reappeared.count)
+        val deck = queries.deck(listOf(reappeared.bucketId)).filter { FolderIndex.isVisible(it, listOf(archive)) }
+        assertEquals(listOf(fresh.key), deck.map { it.key })
+        assertUntouched(old1)
+        assertUntouched(old2)
     }
 }
