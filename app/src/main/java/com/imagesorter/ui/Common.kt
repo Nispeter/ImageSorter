@@ -4,14 +4,18 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -24,8 +28,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.imagesorter.data.MediaOps
@@ -39,7 +43,7 @@ import kotlinx.coroutines.launch
 /** Botón "Confirmar (N)": muestra un resumen, pide confirmación y ejecuta las decisiones registradas. */
 @Composable
 fun CommitBar(ops: MediaOps, dao: DecisionDao, onFinished: () -> Unit, modifier: Modifier = Modifier) {
-    val stagedCount by dao.observeStagedCount().collectAsState(initial = 0)
+    val stagedCount by remember(dao) { dao.observeStagedCount() }.collectAsState(initial = 0)
     val scope = rememberCoroutineScope()
     var summary by remember { mutableStateOf<List<Decision>?>(null) }
     var busy by remember { mutableStateOf(false) }
@@ -86,10 +90,10 @@ fun CommitBar(ops: MediaOps, dao: DecisionDao, onFinished: () -> Unit, modifier:
 }
 
 private fun describe(counts: Map<Action, Int>) = buildString {
-    counts[Action.TRASH]?.let { appendLine("🗑 $it a la papelera (recuperables ~30 días)") }
-    counts[Action.FAVORITOS]?.let { appendLine("⭐ $it a ${Folders.FAVORITOS}") }
-    counts[Action.LIKED]?.let { appendLine("❤️ $it a ${Folders.LIKED}") }
-    counts[Action.KEEP]?.let { appendLine("✓ $it conservadas") }
+    counts[Action.TRASH]?.let { appendLine("$it a la papelera (recuperables ~30 días)") }
+    counts[Action.FAVORITOS]?.let { appendLine("$it a ${Folders.FAVORITOS}") }
+    counts[Action.LIKED]?.let { appendLine("$it a ${Folders.LIKED}") }
+    counts[Action.KEEP]?.let { appendLine("$it conservadas") }
 }.trim()
 
 @Composable
@@ -144,10 +148,11 @@ fun ErrorDialog(message: String, title: String = "Error", onDismiss: () -> Unit)
 }
 
 @Composable
-fun ActionButton(emoji: String, label: String, enabled: Boolean = true, onClick: () -> Unit) {
-    TextButton(onClick = onClick, enabled = enabled, contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)) {
+fun ActionButton(icon: ImageVector, label: String, enabled: Boolean = true, onClick: () -> Unit) {
+    TextButton(onClick = onClick, enabled = enabled, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(emoji, fontSize = 24.sp)
+            Icon(icon, contentDescription = null, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.height(4.dp))
             Text(label, style = MaterialTheme.typography.labelSmall)
         }
     }

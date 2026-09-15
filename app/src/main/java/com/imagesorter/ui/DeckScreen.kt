@@ -4,13 +4,17 @@ import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -30,26 +34,43 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
+import coil.imageLoader
+import coil.request.ImageRequest
+import coil.size.Scale
+import coil.size.Size
 import com.imagesorter.data.MediaOps
 import com.imagesorter.data.MediaQueries
+import com.imagesorter.data.db.ArchiveDao
 import com.imagesorter.data.db.DecisionDao
 import com.imagesorter.domain.Action
+import com.imagesorter.domain.FolderIndex
 import com.imagesorter.domain.Folders
 import com.imagesorter.domain.MediaKey
 import com.imagesorter.domain.ReviewSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DeckScreen(deck: Screen.Deck, queries: MediaQueries, ops: MediaOps, dao: DecisionDao, onBack: () -> Unit) {
+fun DeckScreen(
+    deck: Screen.Deck,
+    queries: MediaQueries,
+    ops: MediaOps,
+    dao: DecisionDao,
+    archiveDao: ArchiveDao,
+    onBack: () -> Unit,
+) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
     val session = remember(deck) {
@@ -65,11 +86,14 @@ fun DeckScreen(deck: Screen.Deck, queries: MediaQueries, ops: MediaOps, dao: Dec
 
     LaunchedEffect(deck, reload) {
         loading = true
-        session.load(withContext(Dispatchers.IO) { queries.deck(deck.bucketIds) })
+        val archives = archiveDao.observeAll().first()
+        val items = withContext(Dispatchers.IO) { queries.deck(deck.bucketIds) }
+        // Lo de carpetas archivadas no vuelve a aparecer, salvo lo que llegó después de archivarlas.
+        session.load(items.filter { FolderIndex.isVisible(it, archives) })
         loading = false
     }
 
-    /** Si guardar falla se informa y devuelve false: la tarjeta no avanza. */
+    /** Si guardar falla se informa y devuelve false. */
     suspend fun guarded(block: suspend () -> Boolean): Boolean = try {
         block()
     } catch (e: CancellationException) {
@@ -79,7 +103,7 @@ fun DeckScreen(deck: Screen.Deck, queries: MediaQueries, ops: MediaOps, dao: Dec
         false
     }
 
-    /** [key] es la foto que se veía al tocar el botón; si ya no está al frente no se registra nada. */
+    /** [key] es lo que se veía al tocar; si ya no está al frente no se registra nada. */
     fun decide(action: Action, key: MediaKey) {
         scope.launch { guarded { session.decide(action, key) } }
     }
@@ -98,6 +122,17 @@ fun DeckScreen(deck: Screen.Deck, queries: MediaQueries, ops: MediaOps, dao: Dec
         }
     }
 
+    // Lo que se muestra en este frame: los toques actúan SOLO sobre eso, y solo después de que estuvo en
+    // pantalla lo que dura un doble toque (así el segundo toque no decide sobre lo siguiente sin verlo).
+    val shown = cards.firstOrNull()?.takeIf { !loading }
+    val shownAt = remember(shown?.key) { SystemClock.uptimeMillis() }
+    val minVisibleMs = LocalViewConfiguration.current.doubleTapTimeoutMillis
+    fun act(action: Action) {
+        val item = shown ?: return
+        if (SystemClock.uptimeMillis() - shownAt < minVisibleMs) return
+        decide(action, item.key)
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -112,36 +147,51 @@ fun DeckScreen(deck: Screen.Deck, queries: MediaQueries, ops: MediaOps, dao: Dec
         },
         bottomBar = {
             Column(Modifier.navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                // La foto que se está mostrando en este frame: los botones actúan SOLO sobre ella, y solo
-                // después de que estuvo en pantalla lo que dura un doble toque (así el segundo toque de un
-                // doble toque no decide sobre la foto siguiente antes de que el usuario la vea).
-                val shown = cards.firstOrNull()?.takeIf { !loading }
-                val shownAt = remember(shown?.key) { SystemClock.uptimeMillis() }
-                val minVisibleMs = LocalViewConfiguration.current.doubleTapTimeoutMillis
-                fun act(action: Action) {
-                    val photo = shown ?: return
-                    if (SystemClock.uptimeMillis() - shownAt < minVisibleMs) return
-                    decide(action, photo.key)
-                }
-                val enabled = shown != null
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    ActionButton("🗑", "Borrar", enabled) { act(Action.TRASH) }
-                    ActionButton("↶", "Deshacer") { undo() }
-                    ActionButton("⭐", "Favoritos", enabled) { act(Action.FAVORITOS) }
-                    ActionButton("❤️", "Liked", enabled) { act(Action.LIKED) }
-                    ActionButton("✓", "Conservar", enabled) { act(Action.KEEP) }
+                    ActionButton(Icons.AutoMirrored.Filled.ArrowBack, "Deshacer") { undo() }
+                    ActionButton(Icons.Filled.Star, "Favoritos", shown != null) { act(Action.FAVORITOS) }
+                    ActionButton(Icons.Filled.FavoriteBorder, "Liked", shown != null) { act(Action.LIKED) }
                 }
                 CommitBar(ops, dao, onFinished = { reload++ })
             }
         },
     ) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding).padding(16.dp), contentAlignment = Alignment.Center) {
-            val current = cards.firstOrNull()
+        BoxWithConstraints(
+            Modifier.fillMaxSize().padding(padding).padding(16.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            val cardSize = with(LocalDensity.current) { Size(maxWidth.roundToPx(), maxHeight.roundToPx()) }
+            // Precarga las siguientes con el tamaño exacto de la tarjeta (así acierta el caché) para que al
+            // avanzar no se vea el recuadro negro mientras carga.
+            LaunchedEffect(cards.take(4).map { it.key }, cardSize) {
+                for (item in cards.drop(1).take(3)) {
+                    context.imageLoader.enqueue(
+                        ImageRequest.Builder(context)
+                            .data(MediaOps.uriOf(item))
+                            .size(cardSize)
+                            .scale(Scale.FIT)
+                            .build(),
+                    )
+                }
+            }
             when {
                 loading -> CircularProgressIndicator()
-                current == null -> Text("No quedan fotos por revisar aquí.", textAlign = TextAlign.Center)
-                else -> key(current.key) {
-                    SwipeCard(current, onSwipe = { action -> guarded { session.decide(action, current.key) } })
+                shown == null -> Text("No quedan fotos ni videos por revisar aquí.", textAlign = TextAlign.Center)
+                else -> {
+                    // La siguiente queda montada detrás: cuando avanza el mazo ya está cargada.
+                    cards.getOrNull(1)?.let { next ->
+                        key(next.key) {
+                            AsyncImage(
+                                model = MediaOps.uriOf(next),
+                                contentDescription = null,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
+                    key(shown.key) {
+                        MediaCard(shown, onTapLeft = { act(Action.TRASH) }, onTapRight = { act(Action.KEEP) })
+                    }
                 }
             }
         }
