@@ -1,6 +1,8 @@
 package com.imagesorter
 
 import android.content.ContentResolver
+import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -85,10 +87,10 @@ class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
     private fun isVideo(name: String) = name.endsWith(".mp4")
 
     /** Bytes distintos por [variant] con extensión .mp4: MediaStore lo indexa como video aunque no se reproduzca. */
-    fun fakeVideo(variant: Int): ByteArray = ByteArray(4096) { ((it * 31) xor variant).toByte() }
+    fun fakeVideo(variant: Int, size: Int = 4096): ByteArray = ByteArray(size) { ((it * 31) xor variant).toByte() }
 
-    fun seed(relativePath: String, name: String, variant: Int): Seeded {
-        val bytes = if (isVideo(name)) fakeVideo(variant) else jpeg(variant)
+    fun seed(relativePath: String, name: String, variant: Int, videoBytes: Int = 4096): Seeded {
+        val bytes = if (isVideo(name)) fakeVideo(variant, videoBytes) else jpeg(variant)
         val path = "/storage/emulated/0/$relativePath$name"
         writeViaShell(path, bytes)
         scan(path)
@@ -96,6 +98,29 @@ class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
             findKey(relativePath, name)?.takeIf { row(it)?.values?.get("_size") == bytes.size.toString() }
         }
         check(sha256(path) == sha256(bytes)) { "El archivo sembrado no coincide: $path" }
+        return Seeded(key, name, relativePath, path, sha256(bytes))
+    }
+
+    /** Crea el archivo con el resolver de la app: su dueño es la app, igual que las copias que ella crea. */
+    fun seedAsApp(relativePath: String, name: String, variant: Int): Seeded {
+        val bytes = if (isVideo(name)) fakeVideo(variant) else jpeg(variant)
+        val kind = if (isVideo(name)) MediaKind.VIDEO else MediaKind.IMAGE
+        val resolver = context.contentResolver
+        val uri = checkNotNull(
+            resolver.insert(
+                MediaQueries.collection(kind, MediaStore.VOLUME_EXTERNAL_PRIMARY),
+                ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                },
+            ),
+        )
+        checkNotNull(resolver.openOutputStream(uri)).use { it.write(bytes) }
+        resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+        val key = MediaKey(MediaStore.VOLUME_EXTERNAL_PRIMARY, ContentUris.parseId(uri))
+        val path = checkNotNull(row(key)) { "no se indexó $name" }.path
+        check(sha256(path) == sha256(bytes)) { "el archivo creado no coincide: $path" }
         return Seeded(key, name, relativePath, path, sha256(bytes))
     }
 
@@ -137,6 +162,14 @@ class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
         return out.lineSequence().firstOrNull { it.isNotBlank() }?.substringBefore(' ')
     }
 
+    /** Cuántos archivos hay en [absoluteDir] que empiezan por [prefix] (para detectar duplicados). */
+    fun countFiles(absoluteDir: String, prefix: String): Int =
+        sh("find $absoluteDir -maxdepth 1 -type f -name $prefix*").lineSequence().count { it.isNotBlank() }
+
+    /** Cuántos archivos de [absoluteDir] contienen [token] en el nombre, incluidos .pending-* y .trashed-*. */
+    fun countFilesContaining(absoluteDir: String, token: String): Int =
+        sh("find $absoluteDir -maxdepth 1 -type f -name *$token*").lineSequence().count { it.isNotBlank() }
+
     fun <T : Any> waitFor(what: String, timeoutMs: Long = 15_000, probe: () -> T?): T {
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         while (true) {
@@ -152,6 +185,5 @@ class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
         val roots = "/storage/emulated/0/Pictures /storage/emulated/0/DCIM /storage/emulated/0/Movies $whatsapp"
         sh("find $roots -type f -name *$runId* -delete")
         sh("find $roots -depth -type d -name $runId* -empty -delete")
-        sh("find $whatsapp -depth -type d -empty -delete")
     }
 }

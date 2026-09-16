@@ -25,14 +25,17 @@ class ArchitectureTest {
 
     @Test
     fun onlyMediaOpsModifiesMediaStore() {
-        val mutating = Regex("""createTrashRequest|createDeleteRequest|createWriteRequest|[Rr]esolver\s*\.\s*update\s*\(""")
+        // MediaOps también inserta/borra/escribe: es la copia verificada para carpetas de otras apps.
+        val mutating = Regex(
+            """createTrashRequest|createDeleteRequest|createWriteRequest|[Rr]esolver\s*\.\s*(update|insert|delete|openOutputStream)\s*\(|openFileDescriptor\s*\([^)]*"[rw]*w""",
+        )
         assertEquals(named("MediaOps.kt"), filesMatching(mutating))
     }
 
     @Test
-    fun nothingDeletesOrWritesFilesDirectly() {
+    fun nothingTouchesFilesBehindMediaStore() {
         val forbidden = Regex(
-            """[Rr]esolver\s*\.\s*(delete|insert|bulkInsert|applyBatch|openOutputStream)\s*\(|java\.io\.File\b|"_data"|MediaColumns\.DATA\b|openFileDescriptor\s*\([^)]*"[rw]*w""",
+            """[Rr]esolver\s*\.\s*(bulkInsert|applyBatch)\s*\(|java\.io\.File\b|"_data"|MediaColumns\.DATA\b""",
         )
         assertEquals(emptySet<String>(), filesMatching(forbidden))
     }

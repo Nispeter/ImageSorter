@@ -1,6 +1,7 @@
 package com.imagesorter
 
 import android.Manifest
+import android.app.PendingIntent
 import android.provider.MediaStore
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
@@ -16,7 +17,6 @@ import com.imagesorter.data.db.AppDatabase
 import com.imagesorter.data.db.Decision
 import com.imagesorter.data.db.DecisionDao
 import com.imagesorter.domain.Action
-import android.util.Log
 import com.imagesorter.data.db.ArchivedFolder
 import com.imagesorter.domain.FolderIndex
 import com.imagesorter.domain.Folders
@@ -25,8 +25,12 @@ import com.imagesorter.domain.ReviewSession
 import com.imagesorter.domain.Status
 import com.imagesorter.ui.ApprovalLauncher
 import com.imagesorter.ui.MainActivity
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -82,10 +86,13 @@ class MediaSafetyTest {
     @After
     fun tearDown() {
         if (!::db.isInitialized) return
-        scenario.close()
-        db.close()
-        fx.cleanup()
-        fx.setManageMedia(false)
+        try {
+            if (::scenario.isInitialized) scenario.close()
+            db.close()
+        } finally {
+            fx.cleanup()
+            fx.setManageMedia(false)
+        }
     }
 
     // ---------- helpers ----------
@@ -551,32 +558,212 @@ class MediaSafetyTest {
     }
 
     @Test
-    fun whatsappFiles_alwaysEndInATrueState() {
+    fun whatsappFiles_canBeTrashed_andFavoritesGoThroughAVerifiedCopy() {
         val dirW = "Android/media/com.whatsapp/WhatsApp/Media/${fx.runId}_WA/"
+        val toTrash = fx.seed(dirW, "${fx.runId}_w0.jpg", variant = 0)
         val photo = fx.seed(dirW, "${fx.runId}_w1.jpg", variant = 1)
         val video = fx.seed(dirW, "${fx.runId}_w2.mp4", variant = 2)
-        assertTrue("la carpeta de WhatsApp aparece", folders().any { it.name == "${fx.runId}_WA" && it.count == 2 })
-        stage(photo, Action.TRASH)
-        stage(video, Action.FAVORITOS)
+        assertTrue("la carpeta de WhatsApp aparece", folders().any { it.name == "${fx.runId}_WA" && it.count == 3 })
+        stage(toTrash, Action.TRASH)
+        stage(photo, Action.FAVORITOS)
+        stage(video, Action.LIKED)
 
         val result = blocking { ops.commitStaged() }
 
-        Log.i("ImageSorterTest", "WhatsApp result=$result photo=${fx.row(photo.key)?.values} video=${fx.row(video.key)?.values}")
-        val done = doneKeys()
-        val failed = result.failures.map { it.displayName }.toSet()
-        // Cada archivo termina hecho y verificado, o informado y sin tocar. Nunca otra cosa.
-        if (photo.key in done) {
-            assertTrashedIntact(photo)
-        } else {
-            assertTrue("el fallo se informa", photo.displayName in failed)
-            assertUntouched(photo)
+        assertEquals(MediaOps.OpResult(3, emptyList(), cancelled = false), result)
+        // Borrar sí funciona ahí; mover no, así que se copia y el original va a la papelera.
+        assertTrashedIntact(toTrash)
+        assertTrashedIntact(photo)
+        assertTrashedIntact(video)
+        assertCopyIsIdentical(photo, Folders.FAVORITOS)
+        assertCopyIsIdentical(video, Folders.LIKED)
+        assertEquals(setOf(toTrash.key, photo.key, video.key), doneKeys())
+    }
+
+    /** Hay UNA sola copia en [target], fuera de la papelera y con exactamente los mismos bytes. */
+    private fun assertCopyIsIdentical(original: MediaFixture.Seeded, target: String) {
+        val copyKey = checkNotNull(fx.findKey(target, original.displayName)) { "no se creó la copia en $target" }
+        assertNotEquals("la copia es otro archivo", original.key, copyKey)
+        val row = checkNotNull(fx.row(copyKey))
+        assertFalse(row.isTrashed)
+        assertEquals(target, row.relativePath)
+        assertEquals("la copia es idéntica", original.sha256, fx.sha256(row.path))
+        val base = original.displayName.substringBeforeLast('.')
+        assertEquals("no se duplicó", 1, fx.countFiles("/storage/emulated/0/$target".trimEnd('/'), base))
+    }
+
+    @Test
+    fun denyingTheTrashDialog_leavesNoDuplicateBehind() {
+        val dirW = "Android/media/com.whatsapp/WhatsApp/Media/${fx.runId}_WA/"
+        val photo = fx.seed(dirW, "${fx.runId}_c1.jpg", variant = 1)
+        val video = fx.seed(dirW, "${fx.runId}_c2.mp4", variant = 2)
+        stage(photo, Action.FAVORITOS)
+        stage(video, Action.LIKED)
+        // El usuario deniega el diálogo del sistema al mandar los originales a la papelera.
+        val denying = MediaOps(resolver, queries, dao, { attachedVolumes() }) { false }
+
+        val result = blocking { denying.commitStaged() }
+
+        assertTrue(result.cancelled)
+        assertEquals(0, result.done)
+        assertUntouched(photo)
+        assertUntouched(video)
+        assertEquals("ninguna copia queda suelta", 0, fx.countFilesContaining("/storage/emulated/0/Pictures/Favoritos", fx.runId))
+        assertEquals("ninguna copia queda suelta", 0, fx.countFilesContaining("/storage/emulated/0/Pictures/Liked", fx.runId))
+        assertEquals(setOf(photo.key, video.key), blocking { dao.staged() }.map { it.key() }.toSet())
+    }
+
+    @Test
+    fun ifTheOriginalVanishesAfterCopying_theCopyIsKept() {
+        val dirW = "Android/media/com.whatsapp/WhatsApp/Media/${fx.runId}_WA/"
+        val photo = fx.seed(dirW, "${fx.runId}_v1.jpg", variant = 3)
+        stage(photo, Action.FAVORITOS)
+        // Otra app borra el original justo después de copiarlo, antes de mandarlo a la papelera.
+        val sabotaged = MediaOps(resolver, queries, dao, { attachedVolumes() }) { request ->
+            fx.sh("rm ${photo.path}")
+            fx.waitFor("desindexar") { if (fx.row(photo.key) == null) true else null }
+            approvals.approve(request)
         }
-        if (video.key in done) {
-            assertMoved(video, Folders.FAVORITOS)
-        } else {
-            assertTrue("el fallo se informa", video.displayName in failed)
-            assertUntouched(video)
+
+        val result = blocking { sabotaged.commitStaged() }
+
+        assertFalse(result.cancelled)
+        assertEquals(1, result.done)
+        val copyKey = checkNotNull(fx.findKey(Folders.FAVORITOS, photo.displayName)) { "la copia debía conservarse" }
+        assertEquals("la copia sigue intacta", photo.sha256, fx.sha256(checkNotNull(fx.row(copyKey)).path))
+        assertTrue(result.failures.single().reason.contains("se conservó la copia"))
+    }
+
+    @Test
+    fun aFileAlreadyInTheTarget_isNeverDeletedByADeniedCopy() {
+        val dirW = "Android/media/com.whatsapp/WhatsApp/Media/${fx.runId}_WA/"
+        val photo = fx.seed(dirW, "${fx.runId}_p1.jpg", variant = 5)
+        // Un favorito anterior con los mismos bytes y creado por la propia app, como sus copias.
+        val existing = fx.seedAsApp(Folders.FAVORITOS, "${fx.runId}_p1.jpg", variant = 5)
+        stage(photo, Action.FAVORITOS)
+        val denying = MediaOps(resolver, queries, dao, { attachedVolumes() }) { false }
+
+        val result = blocking { denying.commitStaged() }
+
+        assertTrue(result.cancelled)
+        assertUntouched(photo)
+        assertUntouched(existing)
+        assertEquals("solo queda el favorito que ya estaba", 1, fx.countFiles("/storage/emulated/0/Pictures/Favoritos", fx.runId))
+    }
+
+    @Test
+    fun anErrorAfterTheTrashRequestWasSent_neverDeletesTheCopy() {
+        val dirW = "Android/media/com.whatsapp/WhatsApp/Media/${fx.runId}_WA/"
+        val photo = fx.seed(dirW, "${fx.runId}_e1.jpg", variant = 6)
+        stage(photo, Action.FAVORITOS)
+        // El sistema aprueba y manda el original a la papelera, pero después algo falla en la app.
+        val failingAfterApproval = MediaOps(resolver, queries, dao, { attachedVolumes() }) { request ->
+            approvals.approve(request)
+            throw IllegalStateException("fallo simulado")
         }
+
+        val error = runCatching { blocking { failingAfterApproval.commitStaged() } }.exceptionOrNull()
+
+        assertTrue("el fallo llega a la pantalla", error is IllegalStateException)
+        assertTrashedIntact(photo)
+        val copyKey = checkNotNull(fx.findKey(Folders.FAVORITOS, photo.displayName)) { "la copia debía conservarse" }
+        assertEquals("la copia sigue intacta", photo.sha256, fx.sha256(checkNotNull(fx.row(copyKey)).path))
+    }
+
+    @Test
+    fun cancellingTheCopyFlow_atAnyMoment_neverLosesOrCorruptsAnything() {
+        val dirW = "Android/media/com.whatsapp/WhatsApp/Media/${fx.runId}_WA/"
+        // Un video grande para que la cancelación tenga buenas chances de caer a mitad de la copia.
+        val video = fx.seed(dirW, "${fx.runId}_big.mp4", variant = 7, videoBytes = 32 * 1024 * 1024)
+        stage(video, Action.LIKED)
+        // Si la cancelación llega tarde, el sistema "deniega": en ningún caso se manda nada a la papelera.
+        val ops = MediaOps(resolver, queries, dao, { attachedVolumes() }) { false }
+        val liked = "/storage/emulated/0/Pictures/Liked"
+
+        runBlocking {
+            val job = launch(Dispatchers.Default) { ops.commitStaged() }
+            fx.waitFor("que empiece la copia", timeoutMs = 30_000) {
+                if (job.isCompleted || fx.countFilesContaining(liked, fx.runId) > 0) true else null
+            }
+            job.cancelAndJoin()
+        }
+
+        // Cancelar a mitad de la copia la borra; cancelar después de pedir la papelera la conserva (regla
+        // conservadora). En los dos casos: el original intacto y nunca una copia a medias.
+        assertUntouched(video)
+        assertEquals(listOf(video.key), blocking { dao.staged() }.map { it.key() })
+        val leftovers = fx.sh("find $liked -maxdepth 1 -type f -name *${fx.runId}* -exec sha256sum {} ;")
+            .lineSequence().filter { it.isNotBlank() }.map { it.substringBefore(' ') }.toList()
+        assertTrue("como mucho queda una copia: $leftovers", leftovers.size <= 1)
+        assertTrue("una copia que quede debe ser idéntica", leftovers.all { it == video.sha256 })
+    }
+
+    @Test
+    fun cancellingRightAfterTheTrashWasApproved_keepsTheOnlyCopy() {
+        val dirW = "Android/media/com.whatsapp/WhatsApp/Media/${fx.runId}_WA/"
+        val photo = fx.seed(dirW, "${fx.runId}_k1.jpg", variant = 10)
+        stage(photo, Action.FAVORITOS)
+        lateinit var job: Job
+        // El sistema manda el original a la papelera y justo después se cancela (p. ej. se cierra la pantalla).
+        val ops = MediaOps(resolver, queries, dao, { attachedVolumes() }) { request ->
+            approvals.approve(request).also { job.cancel() }
+        }
+
+        runBlocking {
+            job = launch(Dispatchers.Default, start = CoroutineStart.LAZY) { ops.commitStaged() }
+            job.start()
+            job.join()
+        }
+
+        assertTrue(job.isCancelled)
+        assertTrashedIntact(photo)
+        val copyKey = checkNotNull(fx.findKey(Folders.FAVORITOS, photo.displayName)) { "la única copia debía conservarse" }
+        assertEquals("la copia sigue intacta", photo.sha256, fx.sha256(checkNotNull(fx.row(copyKey)).path))
+        assertEquals(1, fx.countFilesContaining("/storage/emulated/0/Pictures/Favoritos", fx.runId))
+        assertEquals("queda pendiente para liquidarla después", listOf(photo.key), blocking { dao.staged() }.map { it.key() })
+    }
+
+    @Test
+    fun anErrorWhileTheTrashDialogIsStillOpen_neverDeletesTheCopy() {
+        val dirW = "Android/media/com.whatsapp/WhatsApp/Media/${fx.runId}_WA/"
+        val photo = fx.seed(dirW, "${fx.runId}_o1.jpg", variant = 8)
+        stage(photo, Action.FAVORITOS)
+        var captured: PendingIntent? = null
+        val failsBeforeTheAnswer = MediaOps(resolver, queries, dao, { attachedVolumes() }) { request ->
+            captured = request
+            throw IllegalStateException("fallo con el diálogo abierto")
+        }
+
+        val error = runCatching { blocking { failsBeforeTheAnswer.commitStaged() } }.exceptionOrNull()
+        // El diálogo seguía en pantalla y el usuario lo aprueba después del fallo.
+        assertTrue(blocking { approvals.approve(checkNotNull(captured)) })
+
+        assertTrue("el fallo llega a la pantalla", error is IllegalStateException)
+        fx.waitFor("que el original llegue a la papelera") { if (fx.row(photo.key)?.isTrashed == true) true else null }
+        assertTrashedIntact(photo)
+        val copyKey = checkNotNull(fx.findKey(Folders.FAVORITOS, photo.displayName)) { "la copia debía conservarse" }
+        assertEquals("la copia sigue intacta", photo.sha256, fx.sha256(checkNotNull(fx.row(copyKey)).path))
+    }
+
+    @Test
+    fun aCopyThatDisappearsBeforeSettling_isNotReportedAsDone() {
+        val dirW = "Android/media/com.whatsapp/WhatsApp/Media/${fx.runId}_WA/"
+        val photo = fx.seed(dirW, "${fx.runId}_d1.jpg", variant = 9)
+        stage(photo, Action.FAVORITOS)
+        // Alguien borra la copia ya publicada justo antes de que el original vaya a la papelera.
+        val sabotaged = MediaOps(resolver, queries, dao, { attachedVolumes() }) { request ->
+            val copyKey = checkNotNull(fx.findKey(Folders.FAVORITOS, photo.displayName))
+            fx.sh("rm ${checkNotNull(fx.row(copyKey)).path}")
+            fx.waitFor("que desaparezca la copia") { if (fx.findKey(Folders.FAVORITOS, photo.displayName) == null) true else null }
+            approvals.approve(request)
+        }
+
+        val result = blocking { sabotaged.commitStaged() }
+
+        assertEquals("no se da por hecho", 0, result.done)
+        assertTrue(result.failures.single().reason.contains("la copia no quedó en su sitio"))
+        assertFalse(photo.key in blocking { dao.decidedKeys() })
+        assertTrashedIntact(photo)
     }
 
     @Test

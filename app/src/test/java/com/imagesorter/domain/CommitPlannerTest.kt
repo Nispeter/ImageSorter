@@ -21,11 +21,11 @@ class CommitPlannerTest {
         val plan = CommitPlanner.plan(decisions, current(item(1), item(2), item(3), item(4), item(5)))
 
         assertEquals(listOf(1L, 5L), plan.trash.map { it.mediaId })
-        assertEquals(listOf(2L), plan.favoritos.map { it.mediaId })
-        assertEquals(listOf(3L), plan.liked.map { it.mediaId })
+        assertEquals(listOf(2L to Folders.FAVORITOS, 3L to Folders.LIKED), plan.moves.map { it.decision.mediaId to it.target })
+        assertTrue("nada en carpetas de otras apps se copia", plan.moves.none { it.viaCopy })
         assertEquals(listOf(4L), plan.keep.map { it.mediaId })
         assertTrue(plan.skipped.isEmpty())
-        val all = plan.trash + plan.favoritos + plan.liked + plan.keep
+        val all = plan.trash + plan.moves.map { it.decision } + plan.keep
         assertEquals(all.size, all.map { it.key() }.toSet().size)
     }
 
@@ -39,7 +39,7 @@ class CommitPlannerTest {
     @Test
     fun alreadyTrashed_isSkipped() {
         val plan = CommitPlanner.plan(listOf(staged(1, Action.FAVORITOS)), current(item(1).copy(isTrashed = true)))
-        assertTrue(plan.favoritos.isEmpty())
+        assertTrue(plan.moves.isEmpty())
         assertEquals(SkipReason.ALREADY_TRASHED, plan.skipped.single().reason)
     }
 
@@ -63,7 +63,7 @@ class CommitPlannerTest {
         val inFav = item(1, path = "pictures/favoritos/")
         val decision = Decision.staged(inFav, Action.FAVORITOS, 1)
         val plan = CommitPlanner.plan(listOf(decision), current(inFav))
-        assertTrue(plan.favoritos.isEmpty())
+        assertTrue(plan.moves.isEmpty())
         assertEquals(SkipReason.ALREADY_IN_TARGET, plan.skipped.single().reason)
     }
 
@@ -72,7 +72,7 @@ class CommitPlannerTest {
         val decision = staged(1, Action.LIKED)
         val movedAndRenamed = item(1, name = "IMG_1 (1).jpg", path = Folders.LIKED).copy(dateModified = 5)
         val plan = CommitPlanner.plan(listOf(decision), current(movedAndRenamed))
-        assertTrue(plan.liked.isEmpty())
+        assertTrue(plan.moves.isEmpty())
         assertEquals(SkipReason.ALREADY_IN_TARGET, plan.skipped.single().reason)
     }
 
@@ -84,14 +84,16 @@ class CommitPlannerTest {
     }
 
     @Test
-    fun movingFilesFromAnotherAppsFolder_isSkippedBeforeTrying() {
+    fun movingFilesFromAnotherAppsFolder_goesThroughACopy() {
         val whatsapp = item(1, path = "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video/")
         val decision = Decision.staged(whatsapp, Action.FAVORITOS, 1)
 
         val plan = CommitPlanner.plan(listOf(decision), current(whatsapp))
 
-        assertTrue(plan.favoritos.isEmpty())
-        assertEquals(SkipReason.NOT_MOVABLE, plan.skipped.single().reason)
+        val move = plan.moves.single()
+        assertEquals(Folders.FAVORITOS, move.target)
+        assertTrue("Android no deja moverlo: hay que copiarlo", move.viaCopy)
+        assertTrue(plan.skipped.isEmpty())
     }
 
     @Test
@@ -119,7 +121,7 @@ class CommitPlannerTest {
     fun emptyPlan_producesNoBatches() {
         val plan = CommitPlanner.plan(emptyList(), emptyMap())
         assertTrue(CommitPlanner.batches(plan.trash).isEmpty())
-        assertTrue(CommitPlanner.batches(plan.favoritos).isEmpty())
+        assertTrue(CommitPlanner.batches(plan.moves).isEmpty())
     }
 
     @Test
