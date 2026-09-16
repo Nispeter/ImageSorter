@@ -1,8 +1,6 @@
 package com.imagesorter.ui
 
 import android.widget.VideoView
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -29,7 +27,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,7 +41,6 @@ import coil.compose.AsyncImage
 import com.imagesorter.data.MediaOps
 import com.imagesorter.domain.MediaItem
 import com.imagesorter.domain.MediaKind
-import kotlinx.coroutines.launch
 
 /**
  * Foto o video al frente del mazo. Tocar la mitad izquierda = borrar, la mitad derecha = conservar.
@@ -53,22 +49,6 @@ import kotlinx.coroutines.launch
 @Composable
 fun MediaCard(item: MediaItem, onTapLeft: () -> Unit, onTapRight: () -> Unit, modifier: Modifier = Modifier) {
     var playing by remember(item.key) { mutableStateOf(false) }
-    // Destello de color al elegir: rojo para borrar, verde para conservar.
-    val flash = remember(item.key) { Animatable(0f) }
-    var flashColor by remember(item.key) { mutableStateOf(Color.Transparent) }
-    var deciding by remember(item.key) { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-
-    fun decideWithFlash(color: Color, onDecided: () -> Unit) {
-        if (deciding) return
-        deciding = true
-        scope.launch {
-            flashColor = color
-            flash.animateTo(0.45f, tween(90))
-            flash.animateTo(0f, tween(170))
-            onDecided()
-        }
-    }
 
     Box(
         modifier
@@ -106,12 +86,8 @@ fun MediaCard(item: MediaItem, onTapLeft: () -> Unit, onTapRight: () -> Unit, mo
 
         // Zonas de toque encima de la imagen o el video.
         Row(Modifier.fillMaxSize()) {
-            TapZone(Icons.Filled.Delete, "Borrar", Alignment.BottomStart, Modifier.weight(1f).testTag("tap-left")) {
-                decideWithFlash(BORRAR, onTapLeft)
-            }
-            TapZone(Icons.Filled.Check, "Conservar", Alignment.BottomEnd, Modifier.weight(1f).testTag("tap-right")) {
-                decideWithFlash(CONSERVAR, onTapRight)
-            }
+            TapZone(Icons.Filled.Delete, "Borrar", Alignment.BottomStart, Modifier.weight(1f).testTag("tap-left"), onTapLeft)
+            TapZone(Icons.Filled.Check, "Conservar", Alignment.BottomEnd, Modifier.weight(1f).testTag("tap-right"), onTapRight)
         }
 
         if (item.kind == MediaKind.VIDEO) {
@@ -146,16 +122,8 @@ fun MediaCard(item: MediaItem, onTapLeft: () -> Unit, onTapRight: () -> Unit, mo
                 .background(Color.Black.copy(alpha = 0.5f))
                 .padding(8.dp),
         )
-
-        // Va encima de todo, sin modificadores de toque, así que no intercepta nada.
-        if (flash.value > 0f) {
-            Box(Modifier.matchParentSize().background(flashColor.copy(alpha = flash.value)))
-        }
     }
 }
-
-private val BORRAR = Color(0xFFD32F2F)
-private val CONSERVAR = Color(0xFF2E7D32)
 
 @Composable
 private fun TapZone(icon: ImageVector, label: String, align: Alignment, modifier: Modifier, onTap: () -> Unit) {

@@ -3,7 +3,11 @@ package com.imagesorter.ui
 import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,6 +15,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -34,6 +40,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -127,9 +135,11 @@ fun DeckScreen(
     val shown = cards.firstOrNull()?.takeIf { !loading }
     val shownAt = remember(shown?.key) { SystemClock.uptimeMillis() }
     val minVisibleMs = LocalViewConfiguration.current.doubleTapTimeoutMillis
+    var feedback by remember { mutableStateOf<TapFeedback?>(null) }
     fun act(action: Action) {
         val item = shown ?: return
         if (SystemClock.uptimeMillis() - shownAt < minVisibleMs) return
+        if (action == Action.TRASH || action == Action.KEEP) feedback = TapFeedback(action, SystemClock.uptimeMillis())
         decide(action, item.key)
     }
 
@@ -194,7 +204,31 @@ fun DeckScreen(
                     }
                 }
             }
+            // Efecto breve junto a la zona tocada. Va aparte de la tarjeta: la foto pasa al instante igual.
+            feedback?.let { TapPulse(it, Modifier.align(if (it.action == Action.TRASH) Alignment.BottomStart else Alignment.BottomEnd)) }
         }
     }
     message?.let { (title, text) -> ErrorDialog(text, title) { message = null } }
+}
+
+private data class TapFeedback(val action: Action, val at: Long)
+
+/** Círculo que crece y se desvanece en ~300 ms. Sin modificadores de toque: no intercepta nada. */
+@Composable
+private fun TapPulse(feedback: TapFeedback, modifier: Modifier) {
+    val progress = remember(feedback.at) { Animatable(0f) }
+    LaunchedEffect(feedback.at) { progress.animateTo(1f, tween(300)) }
+    val color = if (feedback.action == Action.TRASH) Color(0xFFD32F2F) else Color(0xFF2E7D32)
+    Box(
+        modifier
+            .padding(12.dp)
+            .size(56.dp)
+            .graphicsLayer {
+                val scale = 0.5f + 0.7f * progress.value
+                scaleX = scale
+                scaleY = scale
+                alpha = 1f - progress.value
+            }
+            .background(color.copy(alpha = 0.7f), CircleShape),
+    )
 }
