@@ -264,6 +264,8 @@ private fun ArchivableRow(onArchive: () -> Unit, content: @Composable () -> Unit
             }
             dismiss
         },
+        // Hay que arrastrar más de media fila: así no se archiva sin querer al desplazar la lista.
+        positionalThreshold = { totalDistance -> totalDistance * 0.6f },
     )
     SwipeToDismissBox(
         state = state,
