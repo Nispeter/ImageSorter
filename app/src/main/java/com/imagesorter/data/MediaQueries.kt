@@ -97,6 +97,7 @@ class MediaQueries(private val resolver: ContentResolver) {
             val size = c.getColumnIndexOrThrow(MediaColumns.SIZE)
             val modified = c.getColumnIndexOrThrow(MediaColumns.DATE_MODIFIED)
             val trashed = c.getColumnIndexOrThrow(MediaColumns.IS_TRASHED)
+            val pending = c.getColumnIndexOrThrow(MediaColumns.IS_PENDING)
             val expires = c.getColumnIndexOrThrow(MediaColumns.DATE_EXPIRES)
             val bucket = c.getColumnIndexOrThrow(MediaColumns.BUCKET_ID)
             val added = c.getColumnIndexOrThrow(MediaColumns.DATE_ADDED)
@@ -110,6 +111,7 @@ class MediaQueries(private val resolver: ContentResolver) {
                     size = c.getLong(size),
                     dateModified = c.getLong(modified),
                     isTrashed = c.getInt(trashed) == 1,
+                    isPending = c.getInt(pending) == 1,
                     dateExpires = if (c.isNull(expires)) null else c.getLong(expires),
                     kind = kind,
                     bucketId = c.getString(bucket) ?: "",
@@ -143,6 +145,7 @@ class MediaQueries(private val resolver: ContentResolver) {
             MediaColumns.SIZE,
             MediaColumns.DATE_MODIFIED,
             MediaColumns.IS_TRASHED,
+            MediaColumns.IS_PENDING,
             MediaColumns.DATE_EXPIRES,
             MediaColumns.BUCKET_ID,
             MediaColumns.DATE_ADDED,

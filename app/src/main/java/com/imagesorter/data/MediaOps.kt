@@ -2,6 +2,7 @@ package com.imagesorter.data
 
 import android.app.PendingIntent
 import android.content.ContentResolver
+import android.content.ContentUris
 import android.content.ContentValues
 import android.net.Uri
 import android.provider.MediaStore
@@ -10,6 +11,7 @@ import com.imagesorter.data.db.Decision
 import com.imagesorter.data.db.DecisionDao
 import com.imagesorter.domain.Action
 import com.imagesorter.domain.CommitPlanner
+import com.imagesorter.domain.CommitPlanner.Move
 import com.imagesorter.domain.CommitPlanner.SkipReason
 import com.imagesorter.domain.Folders
 import com.imagesorter.domain.MediaItem
@@ -17,8 +19,16 @@ import com.imagesorter.domain.MediaKey
 import com.imagesorter.domain.MediaKind
 import com.imagesorter.domain.Verifier
 import com.imagesorter.domain.Verifier.Outcome
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import java.io.FileOutputStream
+import java.io.InputStream
+import java.io.OutputStream
+import java.security.MessageDigest
 
 /**
  * ÚNICA clase que modifica fotos y videos. Cada operación:
@@ -60,8 +70,8 @@ class MediaOps(
                 dao.markDone(d.volume, d.mediaId)
                 done++
             } else {
-                dao.delete(d.volume, d.mediaId) // vuelve al mazo para revisarla de nuevo
-                failures += Failure(d.displayName, skipText(s.reason))
+                dao.delete(d.volume, d.mediaId) // vuelve al mazo para revisarlo de nuevo
+                failures += Failure(d.displayName, skipText(d, s.reason))
             }
         }
 
@@ -71,8 +81,10 @@ class MediaOps(
             if (!approved) return OpResult(done, failures, cancelled = true)
         }
 
-        for ((target, decisions) in listOf(Folders.FAVORITOS to plan.favoritos, Folders.LIKED to plan.liked)) {
-            for (batch in batchesByKind(decisions) { it.kind }) {
+        val (toCopy, toMove) = plan.moves.partition { it.viaCopy }
+
+        for ((target, moves) in toMove.groupBy { it.target }) {
+            for (batch in batchesByKind(moves.map { it.decision }) { it.kind }) {
                 val approved = approve(MediaStore.createWriteRequest(resolver, batch.map { uriOf(it.key(), it.kind) }))
                 val errors = HashMap<MediaKey, String>()
                 if (approved) {
@@ -93,8 +105,156 @@ class MediaOps(
             }
         }
 
+        if (toCopy.isNotEmpty()) {
+            val (copied, cancelled) = copyThenTrashOriginal(toCopy, failures)
+            done += copied
+            if (cancelled) return OpResult(done, failures, cancelled = true)
+        }
+
         for (d in plan.keep) dao.markDone(d.volume, d.mediaId)
         return OpResult(done + plan.keep.size, failures, cancelled = false)
+    }
+
+    /**
+     * Para lo que vive en carpetas de otras apps (WhatsApp, Telegram…), que Android no deja mover:
+     * copia el archivo al destino, comprueba que la copia es idéntica (SHA-256) y recién entonces manda
+     * el original a la papelera.
+     *
+     * Regla: solo se borra una copia creada en esta misma llamada, y solo cuando es seguro que su original
+     * sigue intacto (aún no se pidió mandarlo a la papelera, o el sistema ya respondió y se comprobó que
+     * sigue ahí). Ante la duda la copia se conserva: un duplicado se puede borrar, un archivo perdido no.
+     */
+    private suspend fun copyThenTrashOriginal(moves: List<Move>, failures: MutableList<Failure>): Pair<Int, Boolean> {
+        val targets = moves.associate { it.decision.key() to it.target }
+        val decisions = moves.associate { it.decision.key() to it.decision }
+        val copies = LinkedHashMap<MediaKey, Uri>() // creadas en esta llamada y aún sin liquidar
+        val requested = HashSet<MediaKey>() // originales cuya papelera ya se pidió al sistema
+        var done = 0
+        try {
+            for (move in moves) {
+                currentCoroutineContext().ensureActive()
+                val d = move.decision
+                try {
+                    // Se anota dentro del bloque no cancelable: una copia terminada nunca queda sin registrar.
+                    withContext(NonCancellable + Dispatchers.IO) { copies[d.key()] = copyPending(d, move.target) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    dao.delete(d.volume, d.mediaId)
+                    failures += Failure(d.displayName, "no se pudo copiar: ${e.message ?: e.javaClass.simpleName}")
+                }
+            }
+
+            for (candidates in batchesByKind(copies.keys.map { decisions.getValue(it) }) { it.kind }) {
+                // Se publican justo antes de pedir la papelera: si la app muere antes, las copias siguen pendientes
+                // (invisibles, y el sistema las borra solas). Lo que no quedó bien se deshace sin riesgo.
+                val batch = withContext(NonCancellable + Dispatchers.IO) { publishCopies(candidates, copies, targets, failures) }
+                if (batch.isEmpty()) continue
+                // Antes de lanzar la solicitud: el diálogo puede aprobarse aunque después algo falle aquí.
+                batch.forEach { requested += it.key() }
+                val approved = approve(MediaStore.createTrashRequest(resolver, batch.map { uriOf(it.key(), it.kind) }, true))
+                val copyKeys = batch.associate { it.key() to MediaKey(it.volume, ContentUris.parseId(copies.getValue(it.key()))) }
+                val now = io { queries.snapshot(batch.map { it.key() } + copyKeys.values) }
+                for (d in batch) {
+                    val original = now[d.key()]
+                    val copyUri = copies.getValue(d.key())
+                    if (original == null || original.isTrashed) {
+                        // El original ya no está fuera de la papelera: la copia se conserva siempre.
+                        copies.remove(d.key())
+                        if (Verifier.moved(d, targets.getValue(d.key()), now[copyKeys.getValue(d.key())]) == Outcome.Ok) {
+                            dao.markDone(d.volume, d.mediaId)
+                            done++
+                            if (original == null) failures += Failure(d.displayName, "el original ya no estaba; se conservó la copia")
+                        } else {
+                            dao.delete(d.volume, d.mediaId)
+                            failures += Failure(d.displayName, "la copia no quedó en su sitio; revisa la Papelera")
+                        }
+                    } else {
+                        // El sistema ya respondió y el original sigue intacto: la copia es nuestra y sobra.
+                        copies.remove(d.key())
+                        withContext(NonCancellable + Dispatchers.IO) { runCatching { resolver.delete(copyUri, null, null) } }
+                        if (approved) {
+                            dao.delete(d.volume, d.mediaId)
+                            failures += Failure(d.displayName, "no se movió a la papelera")
+                        }
+                    }
+                }
+                if (!approved) return done to true
+            }
+        } finally {
+            // Solo copias de originales que nunca se pidió mandar a la papelera: esos siguen intactos seguro.
+            val safeToDelete = copies.filterKeys { it !in requested }.values.toList()
+            if (safeToDelete.isNotEmpty()) {
+                withContext(NonCancellable + Dispatchers.IO) {
+                    safeToDelete.forEach { runCatching { resolver.delete(it, null, null) } }
+                }
+            }
+        }
+        return done to false
+    }
+
+    /**
+     * Copia [d] a [target] y la devuelve TODAVÍA PENDIENTE (invisible, y el sistema la borra sola si la app
+     * muere) solo si sus bytes son idénticos a los del original. Nunca reutiliza archivos existentes.
+     */
+    private fun copyPending(d: Decision, target: String): Uri {
+        // setRequireOriginal: se copian también los datos de ubicación. Sin ese permiso falla y no se toca nada.
+        val source = MediaStore.setRequireOriginal(uriOf(d.key(), d.kind))
+        val values = ContentValues().apply {
+            put(MediaColumns.DISPLAY_NAME, d.displayName)
+            put(MediaColumns.RELATIVE_PATH, target)
+            put(MediaColumns.IS_PENDING, 1)
+        }
+        val copy = resolver.insert(MediaQueries.collection(d.kind, d.volume), values)
+            ?: throw IllegalStateException("MediaStore no creó el archivo de destino")
+        try {
+            val sourceHash = resolver.openInputStream(source)?.use { input ->
+                resolver.openFileDescriptor(copy, "w")?.use { descriptor ->
+                    FileOutputStream(descriptor.fileDescriptor).use { output ->
+                        input.copyHashing(output).also { descriptor.fileDescriptor.sync() } // en disco antes de seguir
+                    }
+                } ?: throw IllegalStateException("no se pudo escribir la copia")
+            } ?: throw IllegalStateException("no se pudo leer el original")
+
+            val copyHash = resolver.openInputStream(copy)?.use { it.sha256() }
+                ?: throw IllegalStateException("no se pudo releer la copia")
+            check(sourceHash == copyHash) { "la copia no coincide con el original" }
+            return copy
+        } catch (e: Exception) {
+            runCatching { resolver.delete(copy, null, null) } // no dejar copias a medias
+            throw e
+        }
+    }
+
+    /**
+     * Publica las copias del lote y devuelve solo las decisiones cuya copia quedó visible, en su carpeta y
+     * del tamaño correcto. Las demás se deshacen: para esos originales todavía no se pidió nada.
+     */
+    private suspend fun publishCopies(
+        batch: List<Decision>,
+        copies: MutableMap<MediaKey, Uri>,
+        targets: Map<MediaKey, String>,
+        failures: MutableList<Failure>,
+    ): List<Decision> {
+        val published = mutableListOf<Decision>()
+        for (d in batch) {
+            val copy = copies.getValue(d.key())
+            val ok = runCatching {
+                resolver.update(copy, ContentValues().apply { put(MediaColumns.IS_PENDING, 0) }, null, null)
+                val copyKey = MediaKey(d.volume, ContentUris.parseId(copy))
+                val row = queries.snapshot(listOf(copyKey))[copyKey]
+                row != null && !row.isPending && Verifier.moved(d, targets.getValue(d.key()), row) == Outcome.Ok
+            }.getOrDefault(false)
+            if (ok) {
+                published += d
+            } else {
+                copies.remove(d.key())
+                runCatching { resolver.delete(copy, null, null) }
+                dao.delete(d.volume, d.mediaId)
+                failures += Failure(d.displayName, "la copia no quedó bien; el original no se tocó")
+            }
+        }
+        return published
     }
 
     /** Saca fotos y videos de la papelera. Vuelven a su carpeta (el nombre puede recibir " (1)"). */
@@ -196,12 +356,13 @@ class MediaOps(
     private fun <T> batchesByKind(items: List<T>, kind: (T) -> MediaKind): List<List<T>> =
         items.groupBy(kind).values.flatMap { CommitPlanner.batches(it) }
 
-    private fun skipText(reason: SkipReason) = when (reason) {
+    private fun skipText(decision: Decision, reason: SkipReason) = when (reason) {
         SkipReason.MISSING -> "ya no existe"
-        SkipReason.ALREADY_TRASHED -> "está en la papelera"
-        SkipReason.CHANGED -> "cambió desde que la revisaste"
+        SkipReason.ALREADY_TRASHED -> Folders.targetFor(decision.action)
+            ?.let { "está en la papelera; si venía de otra app, revisa $it: la copia puede estar ahí" }
+            ?: "está en la papelera"
+        SkipReason.CHANGED -> "cambió desde que lo revisaste"
         SkipReason.ALREADY_IN_TARGET -> "ya estaba en la carpeta"
-        SkipReason.NOT_MOVABLE -> "Android no deja mover archivos de otras apps (WhatsApp, etc.); sí puedes borrarlos"
     }
 
     private suspend fun <T> io(block: () -> T): T = withContext(Dispatchers.IO) { block() }
@@ -213,5 +374,31 @@ class MediaOps(
         }
 
         fun uriOf(item: MediaItem): Uri = uriOf(item.key, item.kind)
+
+        private fun InputStream.copyHashing(out: OutputStream): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val read = read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+                out.write(buffer, 0, read)
+            }
+            out.flush()
+            return digest.hex()
+        }
+
+        private fun InputStream.sha256(): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val read = read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+            }
+            return digest.hex()
+        }
+
+        private fun MessageDigest.hex() = digest().joinToString("") { "%02x".format(it) }
     }
 }

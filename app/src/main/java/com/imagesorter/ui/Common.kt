@@ -126,7 +126,7 @@ fun ResultDialog(result: MediaOps.OpResult, onDismiss: () -> Unit) {
                 Text("Hechas: ${result.done}")
                 if (result.cancelled) Text("No se hizo nada más. Lo pendiente sigue guardado.")
                 if (result.failures.isNotEmpty()) {
-                    Text("No se pudieron procesar ${result.failures.size}:")
+                    Text("Avisos (${result.failures.size}):")
                     result.failures.take(20).forEach {
                         Text("• ${it.displayName}: ${it.reason}", style = MaterialTheme.typography.bodySmall)
                     }

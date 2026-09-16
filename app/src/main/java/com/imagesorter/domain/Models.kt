@@ -19,6 +19,8 @@ data class MediaItem(
     val size: Long,
     val dateModified: Long,
     val isTrashed: Boolean = false,
+    /** A medio crear: solo lo ve quien lo creó y el sistema lo borra a los ~7 días. */
+    val isPending: Boolean = false,
     val dateExpires: Long? = null,
     val kind: MediaKind = MediaKind.IMAGE,
     val bucketId: String = "",
@@ -38,6 +40,11 @@ data class MediaItem(
 object Folders {
     const val FAVORITOS = "Pictures/Favoritos/"
     const val LIKED = "Pictures/Liked/"
+
+    /** Carpetas de otras apps (WhatsApp, Telegram…): Android nunca deja mover lo que hay ahí. */
+    private val OTHER_APP_PATH = Regex("(?i)^Android/(data|media|obb)/")
+
+    fun isInsideAnotherApp(relativePath: String) = OTHER_APP_PATH.containsMatchIn(relativePath)
 
     fun targetFor(action: Action): String? = when (action) {
         Action.FAVORITOS -> FAVORITOS
