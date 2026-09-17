@@ -1,5 +1,8 @@
 package com.imagesorter.ui
 
+import android.database.ContentObserver
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -31,12 +34,13 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxState
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -44,10 +48,12 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -62,6 +68,7 @@ import com.imagesorter.domain.FolderIndex
 import com.imagesorter.domain.FolderKey
 import com.imagesorter.domain.FolderSummary
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -93,6 +100,25 @@ fun FolderPickerScreen(
 
     LaunchedEffect(reload) { entries = withContext(Dispatchers.IO) { queries.folderEntries() } }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { reload++ }
+
+    // Fotos o videos que llegan con la app abierta (p. ej. una captura): la lista se actualiza sola.
+    var mediaChanged by remember { mutableIntStateOf(0) }
+    DisposableEffect(context) {
+        val resolver = context.contentResolver
+        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                mediaChanged++
+            }
+        }
+        resolver.registerContentObserver(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL), true, observer)
+        resolver.registerContentObserver(MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL), true, observer)
+        onDispose { resolver.unregisterContentObserver(observer) }
+    }
+    LaunchedEffect(mediaChanged) {
+        if (mediaChanged == 0) return@LaunchedEffect
+        delay(300) // una sola recarga por ráfaga de cambios
+        reload++
+    }
 
     val chosen = index?.visible.orEmpty().filter { it.key in selected }
 
@@ -254,19 +280,28 @@ private fun FolderRow(folder: FolderSummary, checked: Boolean, onToggle: (Boolea
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ArchivableRow(onArchive: () -> Unit, content: @Composable () -> Unit) {
+    // Lo que la fila muestra AHORA: si la lista se actualizó, se archiva hasta lo último que se vio.
+    val currentOnArchive by rememberUpdatedState(onArchive)
     var fired by remember { mutableStateOf(false) }
-    val state = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            val dismiss = value != SwipeToDismissBoxValue.Settled
-            if (dismiss && !fired) {
-                fired = true
-                onArchive()
-            }
-            dismiss
-        },
-        // Hay que arrastrar más de media fila: así no se archiva sin querer al desplazar la lista.
-        positionalThreshold = { totalDistance -> totalDistance * 0.6f },
-    )
+    val density = LocalDensity.current
+    // remember y no rememberSaveable: la lista guarda el estado por carpeta y, si vuelve a aparecer,
+    // no debe hacerlo ya deslizada.
+    val state = remember(density) {
+        SwipeToDismissBoxState(
+            initialValue = SwipeToDismissBoxValue.Settled,
+            density = density,
+            confirmValueChange = { value ->
+                val dismiss = value != SwipeToDismissBoxValue.Settled
+                if (dismiss && !fired) {
+                    fired = true
+                    currentOnArchive()
+                }
+                dismiss
+            },
+            // Hay que arrastrar más de media fila: así no se archiva sin querer al desplazar la lista.
+            positionalThreshold = { totalDistance -> totalDistance * 0.6f },
+        )
+    }
     SwipeToDismissBox(
         state = state,
         backgroundContent = {

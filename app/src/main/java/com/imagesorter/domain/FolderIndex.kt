@@ -50,7 +50,8 @@ object FolderIndex {
             )
         }.sortedWith(compareBy({ it.name.lowercase() }, { it.relativePath }))
         return Result(
-            visible = summaries.filter { it.count > 0 },
+            // Las archivadas con novedades van primero, para que el aviso se vea.
+            visible = summaries.filter { it.count > 0 }.sortedByDescending { it.hasNew },
             archived = summaries.filter { it.archived && it.count == 0 },
         )
     }
