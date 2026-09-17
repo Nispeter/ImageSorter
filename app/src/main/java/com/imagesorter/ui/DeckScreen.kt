@@ -1,5 +1,6 @@
 package com.imagesorter.ui
 
+import android.content.Intent
 import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.activity.compose.BackHandler
@@ -20,6 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -62,6 +64,7 @@ import com.imagesorter.domain.Action
 import com.imagesorter.domain.FolderIndex
 import com.imagesorter.domain.Folders
 import com.imagesorter.domain.MediaKey
+import com.imagesorter.domain.MediaKind
 import com.imagesorter.domain.ReviewSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -143,6 +146,18 @@ fun DeckScreen(
         decide(action, item.key)
     }
 
+    /** Comparte la foto o video que se está viendo. No registra ninguna decisión. */
+    fun share() {
+        val item = shown ?: return
+        val uri = MediaOps.uriOf(item)
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = context.contentResolver.getType(uri) ?: if (item.kind == MediaKind.VIDEO) "video/*" else "image/*"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(send, "Compartir"))
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -161,6 +176,7 @@ fun DeckScreen(
                     ActionButton(Icons.AutoMirrored.Filled.ArrowBack, "Deshacer") { undo() }
                     ActionButton(Icons.Filled.Star, "Favoritos", shown != null) { act(Action.FAVORITOS) }
                     ActionButton(Icons.Filled.FavoriteBorder, "Liked", shown != null) { act(Action.LIKED) }
+                    ActionButton(Icons.Filled.Share, "Compartir", shown != null) { share() }
                 }
                 CommitBar(ops, dao, onFinished = { reload++ })
             }
