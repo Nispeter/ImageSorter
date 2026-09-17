@@ -74,6 +74,16 @@ class FolderIndexTest {
     }
 
     @Test
+    fun foldersWithNewFiles_comeFirst_soTheBadgeIsSeen() {
+        val result = FolderIndex.build(
+            listOf(entry("a", 1), entry("z", 1), entry("z", 9), entry("m", 1), entry("m", 9)),
+            listOf(archived("z", 1), archived("m", 1)),
+        )
+
+        assertEquals(listOf("m", "z", "a"), result.visible.map { it.name })
+    }
+
+    @Test
     fun isVisible_hidesOnlyFilesIndexedUpToTheArchive() {
         val archives = listOf(archived("a", 20))
 

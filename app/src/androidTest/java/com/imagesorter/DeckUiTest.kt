@@ -1,7 +1,12 @@
 package com.imagesorter
 
 import android.Manifest
+import android.app.Activity
+import android.app.Instrumentation
+import android.content.Intent
+import android.net.Uri
 import android.view.ViewConfiguration
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasText
@@ -14,14 +19,18 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
+import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.rule.GrantPermissionRule
+import com.imagesorter.data.MediaOps
 import com.imagesorter.data.MediaQueries
 import com.imagesorter.data.db.AppDatabase
 import com.imagesorter.domain.Action
 import com.imagesorter.domain.FolderIndex
 import com.imagesorter.domain.MediaKey
+import com.imagesorter.domain.MediaKind
 import com.imagesorter.ui.MainActivity
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -91,7 +100,10 @@ class DeckUiTest {
 
     private fun launch() {
         scenario = ActivityScenario.launch(MainActivity::class.java)
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("Todas (", substring = true).fetchSemanticsNodes().isNotEmpty() }
     }
+
+    private fun archivedNamed(folder: String) = runBlocking { db.archive().observeAll().first() }.filter { it.name == folder }
 
     private fun openFolder(folder: String) {
         launch()
@@ -176,6 +188,98 @@ class DeckUiTest {
 
         compose.onNodeWithText("Deshacer").performClick()
         compose.waitUntil(5_000) { compose.onAllNodesWithText(folder).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText(folder).assertIsDisplayed()
         assertTrue(archivedNames().isEmpty())
+    }
+
+    @Test
+    fun anArchivedFolderThatGetsNewPhotos_reappearsVisibleWithTheNewBadge() {
+        val folder = "${fx.runId}_N"
+        repeat(2) { fx.seed("Pictures/$folder/", "${fx.runId}_$it.jpg", variant = it) }
+        launch()
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText(folder))
+        compose.onNodeWithText(folder).performTouchInput { swipeLeft() }
+        compose.waitUntil(5_000) { compose.onAllNodesWithText(folder).fetchSemanticsNodes().isEmpty() }
+
+        // Llega una foto nueva a la carpeta archivada mientras la app está en segundo plano.
+        checkNotNull(scenario).moveToState(Lifecycle.State.CREATED)
+        Thread.sleep(1_100) // date_added tiene resolución de segundos
+        fx.seed("Pictures/$folder/", "${fx.runId}_new.jpg", variant = 9)
+        checkNotNull(scenario).moveToState(Lifecycle.State.RESUMED)
+
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText(folder) and hasText("1 nuevas")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText(folder))
+        compose.onNode(hasText(folder) and hasText("1 nuevas")).assertIsDisplayed()
+    }
+
+    @Test
+    fun anArchivedFolderThatGetsNewPhotosWhileTheAppIsOpen_reappearsWithTheBadge() {
+        val folder = "${fx.runId}_L"
+        repeat(2) { fx.seed("Pictures/$folder/", "${fx.runId}_$it.jpg", variant = it) }
+        launch()
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText(folder))
+        compose.onNodeWithText(folder).performTouchInput { swipeLeft() }
+        compose.waitUntil(5_000) { compose.onAllNodesWithText(folder).fetchSemanticsNodes().isEmpty() }
+
+        // Llega una foto sin salir de la app (p. ej. una captura de pantalla).
+        Thread.sleep(1_100) // date_added tiene resolución de segundos
+        fx.seed("Pictures/$folder/", "${fx.runId}_new.jpg", variant = 9)
+
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText(folder) and hasText("1 nuevas")).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText(folder))
+        compose.onNode(hasText(folder) and hasText("1 nuevas")).assertIsDisplayed()
+    }
+
+    @Test
+    fun archivingARowAfterTheListRefreshed_archivesWhatTheRowShowed() {
+        val folder = "${fx.runId}_R"
+        repeat(2) { fx.seed("Pictures/$folder/", "${fx.runId}_$it.jpg", variant = it) }
+        launch()
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText(folder))
+        compose.onNode(hasText(folder) and hasText("2")).assertIsDisplayed()
+
+        // La lista se actualiza con la fila en pantalla: ahora muestra 3.
+        Thread.sleep(1_100)
+        fx.seed("Pictures/$folder/", "${fx.runId}_2.jpg", variant = 2)
+        checkNotNull(scenario).moveToState(Lifecycle.State.CREATED)
+        checkNotNull(scenario).moveToState(Lifecycle.State.RESUMED)
+        compose.waitUntil(10_000) { compose.onAllNodes(hasText(folder) and hasText("3")).fetchSemanticsNodes().isNotEmpty() }
+
+        compose.onNodeWithText(folder).performTouchInput { swipeLeft() }
+        compose.waitUntil(5_000) { archivedNamed(folder).isNotEmpty() }
+        compose.waitForIdle()
+
+        assertTrue("las 3 que se veían quedan archivadas; ninguna aparece como nueva", compose.onAllNodesWithText(folder).fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test
+    fun share_sendsExactlyThePhotoOnScreen_withoutRecordingAnything() {
+        val folder = "${fx.runId}_S"
+        repeat(2) { fx.seed("Pictures/$folder/", "${fx.runId}_$it.jpg", variant = it) }
+        val order = deckOrder(folder)
+        var chooser: Intent? = null
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val monitor = object : Instrumentation.ActivityMonitor() {
+            override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
+                if (intent.action != Intent.ACTION_CHOOSER) return null
+                chooser = intent
+                return Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null)
+            }
+        }
+        instrumentation.addMonitor(monitor)
+        try {
+            openFolder(folder)
+            waitPastDoubleTapTimeout()
+            compose.onNodeWithText("Compartir").performClick()
+            compose.waitUntil(5_000) { chooser != null }
+        } finally {
+            instrumentation.removeMonitor(monitor)
+        }
+
+        val send = checkNotNull(checkNotNull(chooser).getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java))
+        assertEquals(Intent.ACTION_SEND, send.action)
+        assertEquals(MediaOps.uriOf(order[0], MediaKind.IMAGE), send.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java))
+        assertTrue("el receptor puede leer la foto", send.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
+        assertTrue("compartir no registra decisiones", staged().isEmpty())
     }
 }
