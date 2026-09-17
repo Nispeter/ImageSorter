@@ -44,11 +44,12 @@ import com.imagesorter.domain.MediaKind
 
 /**
  * Foto o video al frente del mazo. Tocar la mitad izquierda = borrar, la mitad derecha = conservar.
- * Los videos muestran su primer cuadro y un botón de reproducción que los abre aquí mismo.
+ * Los videos se reproducen solos aquí mismo; el botón central los pausa o reanuda.
  */
 @Composable
 fun MediaCard(item: MediaItem, onTapLeft: () -> Unit, onTapRight: () -> Unit, modifier: Modifier = Modifier) {
-    var playing by remember(item.key) { mutableStateOf(false) }
+    // Los videos se reproducen solos al aparecer; el botón los pausa.
+    var playing by remember(item.key) { mutableStateOf(item.kind == MediaKind.VIDEO) }
 
     Box(
         modifier
