@@ -19,7 +19,8 @@ class ReviewSession(
     private val attachedVolumes: () -> Set<String>,
     private val lookup: suspend (MediaKey) -> MediaItem?,
 ) {
-    data class Undone(val decision: Decision, val backInDeck: Boolean)
+    /** @param inTrash la foto está en la papelera del sistema sin que esta decisión se haya aplicado. */
+    data class Undone(val decision: Decision, val backInDeck: Boolean, val inTrash: Boolean = false)
 
     private val mutex = Mutex()
     private val _deck = MutableStateFlow<List<MediaItem>>(emptyList())
@@ -56,9 +57,18 @@ class ReviewSession(
         mutex.withLock {
             val last = dao.latestStaged() ?: return@withLock null
             val checkable = last.action != Action.KEEP && last.volume in attachedVolumes()
-            if (checkable && alreadyApplied(last, lookup(last.key()))) {
-                dao.markDone(last.volume, last.mediaId)
-                return@withLock Undone(last, backInDeck = false)
+            if (checkable) {
+                val now = lookup(last.key())
+                if (alreadyApplied(last, now)) {
+                    dao.markDone(last.volume, last.mediaId)
+                    return@withLock Undone(last, backInDeck = false)
+                }
+                if (now?.isTrashed == true) {
+                    // Otra app la mandó a la papelera (o una copia quedó a medias): se deshace la decisión,
+                    // pero no vuelve al mazo algo que está en la papelera.
+                    dao.delete(last.volume, last.mediaId)
+                    return@withLock Undone(last, backInDeck = false, inTrash = true)
+                }
             }
             dao.delete(last.volume, last.mediaId)
             val item = last.toItem()

@@ -24,6 +24,11 @@ object CommitPlanner {
         val skipped: List<Skipped>,
     )
 
+    /** Si [now] ya no es el archivo que se decidió: desapareció, está en la papelera o cambió. */
+    fun changed(d: Decision, now: MediaItem?): Boolean =
+        now == null || now.isTrashed || now.displayName != d.displayName || now.relativePath != d.relativePath ||
+            now.size != d.size || now.dateModified != d.dateModified
+
     /**
      * @param current estado actual por clave; ausente = el archivo ya no existe.
      * Lo que cambió (nombre, ruta, tamaño o fecha) desde que se decidió se omite: nunca se ejecuta una

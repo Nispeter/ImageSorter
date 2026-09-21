@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -50,11 +51,31 @@ class MediaOps(
 
     data class OpResult(val done: Int, val failures: List<Failure>, val cancelled: Boolean)
 
+    private val running = Mutex()
+
+    /**
+     * Una sola operación a la vez: dos en paralelo (doble toque, pantalla recreada) podrían duplicar
+     * copias o decidir con datos ya viejos.
+     */
+    private suspend fun exclusive(what: String, block: suspend () -> OpResult): OpResult {
+        if (!running.tryLock()) {
+            return OpResult(0, listOf(Failure(what, "ya hay cambios aplicándose; espera a que terminen")), cancelled = false)
+        }
+        return try {
+            block()
+        } finally {
+            running.unlock()
+        }
+    }
+
     /**
      * Ejecuta las decisiones registradas con seq <= [upToSeq] (las que el usuario vio en el resumen).
      * Solo por acción explícita del usuario ("Confirmar").
      */
-    suspend fun commitStaged(upToSeq: Long = Long.MAX_VALUE): OpResult {
+    suspend fun commitStaged(upToSeq: Long = Long.MAX_VALUE): OpResult =
+        exclusive("Confirmar") { commitStagedNow(upToSeq) }
+
+    private suspend fun commitStagedNow(upToSeq: Long): OpResult {
         val failures = mutableListOf<Failure>()
         val staged = onAttachedVolumes(dao.staged().filter { it.seq <= upToSeq }, failures, { it.volume }, { it.displayName })
         if (staged.isEmpty()) return OpResult(0, failures, cancelled = false)
@@ -136,7 +157,8 @@ class MediaOps(
                 val d = move.decision
                 try {
                     // Se anota dentro del bloque no cancelable: una copia terminada nunca queda sin registrar.
-                    withContext(NonCancellable + Dispatchers.IO) { copies[d.key()] = copyPending(d, move.target) }
+                    val taken = copies.values.toSet()
+                    withContext(NonCancellable + Dispatchers.IO) { copies[d.key()] = copyPending(d, move.target, taken) }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -150,12 +172,47 @@ class MediaOps(
                 // (invisibles, y el sistema las borra solas). Lo que no quedó bien se deshace sin riesgo.
                 val batch = withContext(NonCancellable + Dispatchers.IO) { publishCopies(candidates, copies, targets, failures) }
                 if (batch.isEmpty()) continue
+                // Copiar videos tarda: el original pudo cambiar mientras tanto. Se comprueba justo antes de
+                // pedir la papelera.
+                val batchCopies = batch.associate { it.key() to MediaKey(it.volume, ContentUris.parseId(copies.getValue(it.key()))) }
+                val before = io { queries.snapshot(batch.map { it.key() } + batchCopies.values) }
+                val fresh = batch.filter { d ->
+                    val original = before[d.key()]
+                    when {
+                        original == null || original.isTrashed -> {
+                            // Otra app lo borró o lo mandó a la papelera: la copia verificada puede ser lo único que
+                            // queda, así que se conserva siempre y no se pide nada para el original.
+                            copies.remove(d.key())
+                            if (Verifier.moved(d, targets.getValue(d.key()), before[batchCopies.getValue(d.key())]) == Outcome.Ok) {
+                                dao.markDone(d.volume, d.mediaId)
+                                done++
+                                val where = if (original == null) "ya no estaba" else "ya estaba en la papelera"
+                                failures += Failure(d.displayName, "el original $where; se conservó la copia")
+                            } else {
+                                dao.delete(d.volume, d.mediaId)
+                                failures += Failure(d.displayName, "la copia no quedó en su sitio; revisa la Papelera")
+                            }
+                            false
+                        }
+                        CommitPlanner.changed(d, original) -> {
+                            // Sigue ahí pero ya no es lo que el usuario vio: no se toca, y su copia sobra.
+                            copies.remove(d.key())?.let { copy ->
+                                withContext(NonCancellable + Dispatchers.IO) { runCatching { resolver.delete(copy, null, null) } }
+                            }
+                            dao.delete(d.volume, d.mediaId)
+                            failures += Failure(d.displayName, "cambió mientras se copiaba; no se tocó el original")
+                            false
+                        }
+                        else -> true
+                    }
+                }
+                if (fresh.isEmpty()) continue
                 // Antes de lanzar la solicitud: el diálogo puede aprobarse aunque después algo falle aquí.
-                batch.forEach { requested += it.key() }
-                val approved = approve(MediaStore.createTrashRequest(resolver, batch.map { uriOf(it.key(), it.kind) }, true))
-                val copyKeys = batch.associate { it.key() to MediaKey(it.volume, ContentUris.parseId(copies.getValue(it.key()))) }
-                val now = io { queries.snapshot(batch.map { it.key() } + copyKeys.values) }
-                for (d in batch) {
+                fresh.forEach { requested += it.key() }
+                val approved = approve(MediaStore.createTrashRequest(resolver, fresh.map { uriOf(it.key(), it.kind) }, true))
+                val copyKeys = fresh.associate { it.key() to MediaKey(it.volume, ContentUris.parseId(copies.getValue(it.key()))) }
+                val now = io { queries.snapshot(fresh.map { it.key() } + copyKeys.values) }
+                for (d in fresh) {
                     val original = now[d.key()]
                     val copyUri = copies.getValue(d.key())
                     if (original == null || original.isTrashed) {
@@ -182,11 +239,21 @@ class MediaOps(
                 if (!approved) return done to true
             }
         } finally {
-            // Solo copias de originales que nunca se pidió mandar a la papelera: esos siguen intactos seguro.
-            val safeToDelete = copies.filterKeys { it !in requested }.values.toList()
-            if (safeToDelete.isNotEmpty()) {
+            // Copias de originales que nunca se pidió mandar a la papelera. Se borran solo si el original sigue
+            // ahí y fuera de la papelera: otra app pudo borrarlo mientras tanto, y entonces la copia es lo único
+            // que queda y se publica (una copia pendiente la borra el sistema). Si no se puede comprobar, también.
+            val unrequested = copies.filterKeys { it !in requested }
+            if (unrequested.isNotEmpty()) {
                 withContext(NonCancellable + Dispatchers.IO) {
-                    safeToDelete.forEach { runCatching { resolver.delete(it, null, null) } }
+                    val originals = runCatching { queries.snapshot(unrequested.keys.toList()) }.getOrNull()
+                    for ((key, copy) in unrequested) {
+                        val original = originals?.get(key)
+                        if (original != null && !original.isTrashed) {
+                            runCatching { resolver.delete(copy, null, null) }
+                        } else {
+                            runCatching { resolver.update(copy, ContentValues().apply { put(MediaColumns.IS_PENDING, 0) }, null, null) }
+                        }
+                    }
                 }
             }
         }
@@ -197,7 +264,7 @@ class MediaOps(
      * Copia [d] a [target] y la devuelve TODAVÍA PENDIENTE (invisible, y el sistema la borra sola si la app
      * muere) solo si sus bytes son idénticos a los del original. Nunca reutiliza archivos existentes.
      */
-    private fun copyPending(d: Decision, target: String): Uri {
+    private fun copyPending(d: Decision, target: String, taken: Set<Uri>): Uri {
         // setRequireOriginal: se copian también los datos de ubicación. Sin ese permiso falla y no se toca nada.
         val source = MediaStore.setRequireOriginal(uriOf(d.key(), d.kind))
         val values = ContentValues().apply {
@@ -207,6 +274,8 @@ class MediaOps(
         }
         val copy = resolver.insert(MediaQueries.collection(d.kind, d.volume), values)
             ?: throw IllegalStateException("MediaStore no creó el archivo de destino")
+        // Si devolviera una fila que ya es de otra copia, se aborta SIN borrarla: no es nuestra.
+        check(copy !in taken) { "MediaStore devolvió un destino que ya estaba en uso" }
         try {
             val sourceHash = resolver.openInputStream(source)?.use { input ->
                 resolver.openFileDescriptor(copy, "w")?.use { descriptor ->
@@ -258,7 +327,9 @@ class MediaOps(
     }
 
     /** Saca fotos y videos de la papelera. Vuelven a su carpeta (el nombre puede recibir " (1)"). */
-    suspend fun restore(items: List<MediaItem>): OpResult {
+    suspend fun restore(items: List<MediaItem>): OpResult = exclusive("Restaurar") { restoreNow(items) }
+
+    private suspend fun restoreNow(items: List<MediaItem>): OpResult {
         val failures = mutableListOf<Failure>()
         var done = 0
         val available = onAttachedVolumes(items, failures, { it.volume }, { it.displayName })
@@ -283,17 +354,22 @@ class MediaOps(
      * BORRADO DEFINITIVO. Solo desde la pantalla Papelera, tras confirmación del usuario.
      * Justo antes vuelve a comprobar que cada archivo sigue en la papelera; los demás no se tocan.
      */
-    suspend fun deleteForever(items: List<MediaItem>): OpResult {
+    suspend fun deleteForever(items: List<MediaItem>): OpResult =
+        exclusive("Borrar para siempre") { deleteForeverNow(items) }
+
+    private suspend fun deleteForeverNow(items: List<MediaItem>): OpResult {
         val failures = mutableListOf<Failure>()
         val available = onAttachedVolumes(items, failures, { it.volume }, { it.displayName })
-        val before = io { queries.snapshot(available.map { it.key }) }
-        val eligible = available.filter { item ->
-            val inTrash = before[item.key]?.isTrashed == true
-            if (!inTrash) failures += Failure(item.displayName, "ya no está en la papelera")
-            inTrash
-        }
         var done = 0
-        for (batch in batchesByKind(eligible) { it.kind }) {
+        for (candidates in batchesByKind(available) { it.kind }) {
+            // Se comprueba lote a lote, no una sola vez: entre un lote y el siguiente algo pudo restaurarse.
+            val before = io { queries.snapshot(candidates.map { it.key }) }
+            val batch = candidates.filter { item ->
+                val inTrash = before[item.key]?.isTrashed == true
+                if (!inTrash) failures += Failure(item.displayName, "ya no está en la papelera")
+                inTrash
+            }
+            if (batch.isEmpty()) continue
             val approved = approve(MediaStore.createDeleteRequest(resolver, batch.map { uriOf(it) }))
             val now = io { queries.snapshot(batch.map { it.key }) }
             for (item in batch) {
