@@ -1,8 +1,10 @@
 package com.imagesorter.ui
 
 import android.widget.VideoView
+import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -27,13 +29,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -41,9 +48,11 @@ import coil.compose.AsyncImage
 import com.imagesorter.data.MediaOps
 import com.imagesorter.domain.MediaItem
 import com.imagesorter.domain.MediaKind
+import kotlinx.coroutines.launch
 
 /**
- * Foto o video al frente del mazo. Tocar la mitad izquierda = borrar, la mitad derecha = conservar.
+ * Foto o video al frente del mazo. Tocar la mitad izquierda o deslizar a la izquierda = borrar; la mitad
+ * derecha o deslizar a la derecha = conservar. Un deslizamiento corto vuelve a su lugar sin decidir.
  * Los videos se reproducen solos aquí mismo; el botón central los pausa o reanuda.
  */
 @Composable
@@ -51,9 +60,37 @@ fun MediaCard(item: MediaItem, onTapLeft: () -> Unit, onTapRight: () -> Unit, mo
     // Los videos se reproducen solos al aparecer; el botón los pausa.
     var playing by remember(item.key) { mutableStateOf(item.kind == MediaKind.VIDEO) }
 
+    val onLeft by rememberUpdatedState(onTapLeft)
+    val onRight by rememberUpdatedState(onTapRight)
+    val offsetX = remember(item.key) { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+
     Box(
         modifier
             .fillMaxSize()
+            .graphicsLayer {
+                translationX = offsetX.value
+                rotationZ = offsetX.value / 60f
+            }
+            // Deslizar: los toques siguen yendo a las zonas de abajo; solo un arrastre horizontal llega aquí.
+            .pointerInput(item.key) {
+                val threshold = size.width * 0.3f
+                detectHorizontalDragGestures(
+                    onDragEnd = {
+                        val x = offsetX.value
+                        when {
+                            x <= -threshold -> onLeft()
+                            x >= threshold -> onRight()
+                        }
+                        // Si se decidió, la tarjeta ya cambió; si no (corto o ignorado), vuelve a su lugar.
+                        scope.launch { offsetX.animateTo(0f) }
+                    },
+                    onDragCancel = { scope.launch { offsetX.animateTo(0f) } },
+                ) { change, dragAmount ->
+                    change.consume()
+                    scope.launch { offsetX.snapTo(offsetX.value + dragAmount) }
+                }
+            }
             .testTag("card")
             .clip(RoundedCornerShape(16.dp))
             .background(Color.Black),
@@ -78,7 +115,7 @@ fun MediaCard(item: MediaItem, onTapLeft: () -> Unit, onTapRight: () -> Unit, mo
             )
         } else {
             AsyncImage(
-                model = MediaOps.uriOf(item),
+                model = imageOf(LocalContext.current, item),
                 contentDescription = item.displayName,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize(),
