@@ -2,6 +2,7 @@ package com.imagesorter
 
 import android.Manifest
 import android.app.PendingIntent
+import android.os.Build
 import android.provider.MediaStore
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
@@ -25,6 +26,7 @@ import com.imagesorter.domain.ReviewSession
 import com.imagesorter.domain.Status
 import com.imagesorter.ui.ApprovalLauncher
 import com.imagesorter.ui.MainActivity
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -53,11 +55,7 @@ import org.junit.runner.RunWith
 class MediaSafetyTest {
     @get:Rule
     val permissions: GrantPermissionRule =
-        GrantPermissionRule.grant(
-            Manifest.permission.READ_MEDIA_IMAGES,
-            Manifest.permission.READ_MEDIA_VIDEO,
-            Manifest.permission.ACCESS_MEDIA_LOCATION,
-        )
+        GrantPermissionRule.grant(*mediaPermissions())
 
     private val fx = MediaFixture()
     private val resolver = fx.context.contentResolver
@@ -75,7 +73,7 @@ class MediaSafetyTest {
     fun setUp() {
         assumeTrue("Estos tests crean y borran fotos: solo se ejecutan en un emulador", fx.isEmulator())
         fx.setManageMedia(true)
-        assertTrue("MANAGE_MEDIA no quedó concedido", MediaStore.canManageMedia(fx.context))
+        if (Build.VERSION.SDK_INT >= 31) assertTrue("MANAGE_MEDIA no quedó concedido", MediaStore.canManageMedia(fx.context))
         db = Room.inMemoryDatabaseBuilder(fx.context, AppDatabase::class.java).build()
         dao = db.decisions()
         scenario = ActivityScenario.launch(MainActivity::class.java)
@@ -409,7 +407,7 @@ class MediaSafetyTest {
     @Test
     fun withoutMediaManagement_cancellingTheSystemDialogChangesNothing() {
         fx.setManageMedia(false)
-        assertFalse(MediaStore.canManageMedia(fx.context))
+        if (Build.VERSION.SDK_INT >= 31) assertFalse(MediaStore.canManageMedia(fx.context))
         val (photo) = seed(dirA, 1)
         stage(photo, Action.TRASH)
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
@@ -431,7 +429,7 @@ class MediaSafetyTest {
     @Test
     fun withoutMediaManagement_approvingTheSystemDialogCommits() {
         fx.setManageMedia(false)
-        assertFalse(MediaStore.canManageMedia(fx.context))
+        if (Build.VERSION.SDK_INT >= 31) assertFalse(MediaStore.canManageMedia(fx.context))
         val (photo) = seed(dirA, 1)
         stage(photo, Action.TRASH)
         val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
@@ -789,5 +787,157 @@ class MediaSafetyTest {
         assertEquals(listOf(fresh.key), deck.map { it.key })
         assertUntouched(old1)
         assertUntouched(old2)
+    }
+
+    // ---------- comprobaciones justo antes de tocar cada lote ----------
+
+    @Test
+    fun deleteForever_checksEachBatch_soSomethingRestoredMeanwhileSurvives() {
+        val photo = fx.seed(dirA, "${fx.runId}_d1.jpg", variant = 61)
+        val video = fx.seed(dirA, "${fx.runId}_d2.mp4", variant = 62)
+        stage(photo, Action.TRASH)
+        stage(video, Action.TRASH)
+        blocking { ops.commitStaged() }
+        val photoPath = checkNotNull(fx.row(photo.key)).path
+        val trashed = queries.trash()
+        val photoItem = trashed.single { it.key == photo.key }
+        val videoItem = trashed.single { it.key == video.key }
+        // Mientras se aprueba el primer lote (las fotos), otra app saca el video de la papelera.
+        var firstRequest = true
+        val restoringMeanwhile = MediaOps(resolver, queries, dao, { attachedVolumes() }) { request ->
+            if (firstRequest) {
+                firstRequest = false
+                fx.untrash(video.key, MediaKind.VIDEO)
+            }
+            approvals.approve(request)
+        }
+
+        val result = blocking { restoringMeanwhile.deleteForever(listOf(photoItem, videoItem)) }
+
+        assertEquals(1, result.done)
+        assertNull("la foto del primer lote sí se borra", fx.row(photo.key))
+        assertNull("y su archivo también", fx.sha256(photoPath))
+        val row = checkNotNull(fx.row(video.key)) { "el video restaurado NO debía borrarse" }
+        assertFalse("el video quedó fuera de la papelera", row.isTrashed)
+        assertEquals("con sus bytes intactos", video.sha256, fx.sha256(row.path))
+        assertEquals(listOf(video.displayName), result.failures.map { it.displayName })
+    }
+
+    @Test
+    fun anOriginalChangedWhileCopying_isNeverTrashed_andItsCopyIsRemoved() {
+        val dirW = "Android/media/com.whatsapp/WhatsApp/Media/${fx.runId}_WA/"
+        val photo = fx.seed(dirW, "${fx.runId}_c1.jpg", variant = 81)
+        val video = fx.seed(dirW, "${fx.runId}_c2.mp4", variant = 82)
+        stage(photo, Action.FAVORITOS)
+        stage(video, Action.FAVORITOS)
+        // Todo se copia primero y los lotes van por tipo: mientras se aprueba el de fotos, otra app
+        // reescribe el video original.
+        var firstRequest = true
+        val changingMeanwhile = MediaOps(resolver, queries, dao, { attachedVolumes() }) { request ->
+            if (firstRequest) {
+                firstRequest = false
+                fx.rewrite(video, variant = 99)
+            }
+            approvals.approve(request)
+        }
+
+        val result = blocking { changingMeanwhile.commitStaged() }
+
+        assertTrashedIntact(photo)
+        val copy = checkNotNull(fx.findKey(Folders.FAVORITOS, photo.displayName)) { "la foto sí se copia" }
+        assertEquals(photo.sha256, fx.sha256(checkNotNull(fx.row(copy)).path))
+        val videoRow = checkNotNull(fx.row(video.key)) { "el video cambiado no debía desaparecer" }
+        assertFalse("el video cambiado NO va a la papelera", videoRow.isTrashed)
+        assertEquals(
+            "no queda copia del video en Favoritos",
+            0,
+            fx.countFilesContaining("/storage/emulated/0/Pictures/Favoritos", video.displayName),
+        )
+        assertTrue(
+            "se avisa del video: ${result.failures}",
+            result.failures.any { it.displayName == video.displayName && it.reason.contains("cambió") },
+        )
+    }
+
+    @Test
+    fun aSecondCommitWhileOneIsRunning_doesNothing() {
+        val (a, b) = seed(dirA, 2, from = 70)
+        stage(a, Action.TRASH)
+        stage(b, Action.TRASH)
+        val inside = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val slow = MediaOps(resolver, queries, dao, { attachedVolumes() }) { request ->
+            inside.complete(Unit)
+            release.await()
+            approvals.approve(request)
+        }
+
+        runBlocking {
+            val first = async(Dispatchers.Default) { slow.commitStaged() }
+            try {
+                withTimeout(30_000) { inside.await() } // el primero ya está dentro
+                // Con timeout: si el candado fallara, el segundo se quedaría esperando y el test colgaría.
+                val second = withTimeout(10_000) { slow.commitStaged() }
+
+                assertEquals(0, second.done)
+                assertTrue("avisa que hay algo en curso: ${second.failures}", second.failures.single().reason.contains("ya hay cambios"))
+            } finally {
+                release.complete(Unit)
+            }
+            assertEquals("el primero termina completo", 2, withTimeout(60_000) { first.await() }.done)
+        }
+        assertTrashedIntact(a)
+        assertTrashedIntact(b)
+    }
+
+    @Test
+    fun anOriginalDeletedByAnotherAppWhileCopying_keepsTheVerifiedCopy() {
+        val dirW = "Android/media/com.whatsapp/WhatsApp/Media/${fx.runId}_WA/"
+        val photo = fx.seed(dirW, "${fx.runId}_v1.jpg", variant = 91)
+        val video = fx.seed(dirW, "${fx.runId}_v2.mp4", variant = 92)
+        stage(photo, Action.FAVORITOS)
+        stage(video, Action.FAVORITOS)
+        // Mientras se aprueba el lote de fotos, otra app (una limpieza de WhatsApp) borra el video original.
+        var firstRequest = true
+        val deletingMeanwhile = MediaOps(resolver, queries, dao, { attachedVolumes() }) { request ->
+            if (firstRequest) {
+                firstRequest = false
+                fx.sh("rm ${video.path}")
+                fx.scan(video.path)
+                fx.waitFor("que desaparezca el original") { if (fx.row(video.key) == null) true else null }
+            }
+            approvals.approve(request)
+        }
+
+        val result = blocking { deletingMeanwhile.commitStaged() }
+
+        assertTrashedIntact(photo)
+        val copy = checkNotNull(fx.findKey(Folders.FAVORITOS, video.displayName)) { "la copia del video debía conservarse" }
+        assertEquals("la copia tiene los bytes del original", video.sha256, fx.sha256(checkNotNull(fx.row(copy)).path))
+        assertTrue("queda como hecha", video.key in doneKeys())
+        assertTrue("se avisa: ${result.failures}", result.failures.any { it.displayName == video.displayName && it.reason.contains("se conservó la copia") })
+    }
+
+    @Test
+    fun aFailureWhileAnotherAppDeletesAnOriginal_keepsAndPublishesItsCopy() {
+        val dirW = "Android/media/com.whatsapp/WhatsApp/Media/${fx.runId}_WA/"
+        val photo = fx.seed(dirW, "${fx.runId}_f1.jpg", variant = 95)
+        val video = fx.seed(dirW, "${fx.runId}_f2.mp4", variant = 96)
+        stage(photo, Action.FAVORITOS)
+        stage(video, Action.FAVORITOS)
+        // Todo ya está copiado. En el primer lote otra app borra el video original y algo falla en la app.
+        val failing = MediaOps(resolver, queries, dao, { attachedVolumes() }) { _ ->
+            fx.sh("rm ${video.path}")
+            fx.scan(video.path)
+            fx.waitFor("que desaparezca el original") { if (fx.row(video.key) == null) true else null }
+            throw IllegalStateException("fallo simulado")
+        }
+
+        val error = runCatching { blocking { failing.commitStaged() } }.exceptionOrNull()
+
+        assertTrue("el fallo llega a la pantalla", error is IllegalStateException)
+        assertUntouched(photo)
+        val copy = checkNotNull(fx.findKey(Folders.FAVORITOS, video.displayName)) { "la copia del video debía quedar visible" }
+        assertEquals("con los bytes del original", video.sha256, fx.sha256(checkNotNull(fx.row(copy)).path))
     }
 }

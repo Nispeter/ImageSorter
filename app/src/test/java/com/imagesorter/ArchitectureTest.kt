@@ -26,10 +26,41 @@ class ArchitectureTest {
     @Test
     fun onlyMediaOpsModifiesMediaStore() {
         // MediaOps también inserta/borra/escribe: es la copia verificada para carpetas de otras apps.
+        // Abrir un descriptor se prohíbe en cualquier modo: "w" trunca la foto del usuario.
         val mutating = Regex(
-            """createTrashRequest|createDeleteRequest|createWriteRequest|[Rr]esolver\s*\.\s*(update|insert|delete|openOutputStream)\s*\(|openFileDescriptor\s*\([^)]*"[rw]*w""",
+            """createTrashRequest|createDeleteRequest|createWriteRequest|openOutputStream\s*\(|open(Asset|TypedAsset)?FileDescriptor\s*\(|""" +
+                """[Rr]esolver(\(\))?\s*(\?\.|\.)\s*(update|insert|delete|bulkInsert|applyBatch|call)\s*\(""",
         )
         assertEquals(named("MediaOps.kt"), filesMatching(mutating))
+    }
+
+    /**
+     * Fuera de MediaOps el resolver solo puede leer. Es una lista blanca: cualquier llamada nueva
+     * (update, insert, delete, applyBatch, call…) hace fallar este test aunque el nombre sea otro.
+     */
+    @Test
+    fun outsideMediaOps_theResolverOnlyReads() {
+        val readOnly = setOf("query", "getType", "openInputStream", "registerContentObserver", "unregisterContentObserver")
+        // Solo llamadas (minúscula): ContentResolver.QUERY_ARG_* son constantes, no tocan nada.
+        val used = Regex("""\w*[Rr]esolver(?:\(\))?\s*(?:\?\.|\.)\s*([a-z]\w*)""")
+        val offenders = sources
+            .filterKeys { it !in named("MediaOps.kt") }
+            .mapValues { (_, text) -> used.findAll(text).map { it.groupValues[1] }.filterNot { it in readOnly }.toList() }
+            .filterValues { it.isNotEmpty() }
+        assertEquals(emptyMap<String, List<String>>(), offenders)
+        // Formas que esconden el receptor: with(resolver) { delete(...) }, resolver::delete, resolver.run { ... }.
+        val hidden = Regex("""with\s*\([^)]*[Rr]esolver|[Rr]esolver(\(\))?\s*::|[Rr]esolver(\(\))?\s*(\?\.|\.)\s*(run|let|apply|also)\b""")
+        assertEquals(emptySet<String>(), filesMatching(hidden) - named("MediaOps.kt"))
+    }
+
+    /**
+     * Cualquier archivo nuevo que use el resolver (aunque sea con otro nombre de variable) hace fallar
+     * este test: hay que revisarlo y agregarlo aquí a propósito.
+     */
+    @Test
+    fun theResolverAppearsOnlyInReviewedFiles() {
+        val reviewed = named("MediaOps.kt", "MediaQueries.kt", "DeckScreen.kt", "FolderPickerScreen.kt", "MainActivity.kt")
+        assertEquals(emptySet<String>(), filesMatching(Regex("""[Cc]ontentResolver""")) - reviewed)
     }
 
     @Test

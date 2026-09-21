@@ -4,6 +4,7 @@ import com.imagesorter.data.db.Decision
 import com.imagesorter.domain.CommitPlanner.SkipReason
 import com.imagesorter.item
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -130,5 +131,18 @@ class CommitPlannerTest {
         val batches = CommitPlanner.batches(items)
         assertEquals(listOf(200, 200, 50), batches.map { it.size })
         assertEquals(items, batches.flatten())
+    }
+
+    @Test
+    fun changed_detectsAnythingThatIsNotTheFileThatWasDecided() {
+        val decision = Decision.staged(item(1), Action.FAVORITOS, 1)
+
+        assertFalse(CommitPlanner.changed(decision, item(1)))
+        assertTrue("ya no existe", CommitPlanner.changed(decision, null))
+        assertTrue("está en la papelera", CommitPlanner.changed(decision, item(1).copy(isTrashed = true)))
+        assertTrue("otro tamaño", CommitPlanner.changed(decision, item(1).copy(size = item(1).size + 1)))
+        assertTrue("otra fecha", CommitPlanner.changed(decision, item(1).copy(dateModified = item(1).dateModified + 1)))
+        assertTrue("otro nombre", CommitPlanner.changed(decision, item(1).copy(displayName = "otra.jpg")))
+        assertTrue("otra carpeta", CommitPlanner.changed(decision, item(1).copy(relativePath = "DCIM/Otra/")))
     }
 }

@@ -7,18 +7,23 @@ import android.content.Intent
 import android.net.Uri
 import android.view.ViewConfiguration
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.core.content.IntentCompat
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
+import androidx.compose.ui.test.swipeRight
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -31,6 +36,7 @@ import com.imagesorter.domain.Action
 import com.imagesorter.domain.FolderIndex
 import com.imagesorter.domain.MediaKey
 import com.imagesorter.domain.MediaKind
+import com.imagesorter.ui.CONFIRM_MIN_VISIBLE_MS
 import com.imagesorter.ui.MainActivity
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -48,11 +54,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class DeckUiTest {
     @get:Rule
-    val permissions: GrantPermissionRule = GrantPermissionRule.grant(
-        Manifest.permission.READ_MEDIA_IMAGES,
-        Manifest.permission.READ_MEDIA_VIDEO,
-        Manifest.permission.ACCESS_MEDIA_LOCATION,
-    )
+    val permissions: GrantPermissionRule = GrantPermissionRule.grant(*mediaPermissions())
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -73,10 +75,19 @@ class DeckUiTest {
     @After
     fun tearDown() {
         if (!active) return
-        scenario?.close()
-        db.clearAllTables()
-        fx.cleanup()
-        fx.setManageMedia(false)
+        try {
+            scenario?.close()
+            db.clearAllTables()
+            fx.cleanup()
+        } finally {
+            fx.setManageMedia(false)
+        }
+    }
+
+    /** Las confirmaciones destructivas ignoran toques hasta haber estado en pantalla este tiempo. */
+    private fun waitUntilConfirmationIsReadable() {
+        compose.waitForIdle()
+        Thread.sleep(CONFIRM_MIN_VISIBLE_MS + 300)
     }
 
     private fun staged() = runBlocking { db.decisions().staged() }
@@ -276,10 +287,104 @@ class DeckUiTest {
             instrumentation.removeMonitor(monitor)
         }
 
-        val send = checkNotNull(checkNotNull(chooser).getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java))
+        val send = checkNotNull(IntentCompat.getParcelableExtra(checkNotNull(chooser), Intent.EXTRA_INTENT, Intent::class.java))
         assertEquals(Intent.ACTION_SEND, send.action)
-        assertEquals(MediaOps.uriOf(order[0], MediaKind.IMAGE), send.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java))
+        assertEquals(MediaOps.uriOf(order[0], MediaKind.IMAGE), IntentCompat.getParcelableExtra(send, Intent.EXTRA_STREAM, Uri::class.java))
         assertTrue("el receptor puede leer la foto", send.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
         assertTrue("compartir no registra decisiones", staged().isEmpty())
+    }
+
+    @Test
+    fun sendingToTheTrash_asksTwice_andCancellingTheSecondQuestionChangesNothing() {
+        val folder = "${fx.runId}_T"
+        val seeds = (0 until 2).map { fx.seed("Pictures/$folder/", "${fx.runId}_$it.jpg", variant = it) }
+        val order = deckOrder(folder)
+        val chosen = seeds.single { it.key == order[0] }
+
+        openFolder(folder)
+        waitPastDoubleTapTimeout()
+        compose.onNodeWithTag("tap-left").performClick()
+        compose.waitUntil(5_000) { staged().size == 1 }
+
+        compose.onNodeWithText("Confirmar (1)").performClick()
+        compose.onNodeWithText("¿Aplicar cambios?").assertIsDisplayed()
+        compose.onNodeWithText("Continuar").performClick()
+        compose.onNodeWithText("¿Mandar 1 a la papelera?").assertIsDisplayed()
+        compose.onNodeWithText("Cancelar").performClick()
+        compose.waitForIdle()
+        Thread.sleep(1_500)
+
+        seeds.forEach { s -> assertFalse("nada se aplica sin la segunda confirmación", checkNotNull(fx.row(s.key)).isTrashed) }
+        assertEquals("la decisión sigue guardada", 1, staged().size)
+
+        // Un doble toque: el segundo cae donde estaba "Continuar" y no debe aceptar la pregunta final.
+        compose.onNodeWithText("Confirmar (1)").performClick()
+        compose.onNodeWithText("Continuar").performClick()
+        compose.onNodeWithText("Sí, a la papelera").performClick()
+        Thread.sleep(1_500)
+        assertFalse("un doble toque no confirma", checkNotNull(fx.row(chosen.key)).isTrashed)
+        assertEquals(1, staged().size)
+
+        // Leída la pregunta, sí se aplica.
+        waitUntilConfirmationIsReadable()
+        compose.onNodeWithText("Sí, a la papelera").performClick()
+        compose.waitUntil(20_000) { checkNotNull(fx.row(chosen.key)).isTrashed }
+        assertTrue("solo se aplicó la elegida", seeds.filter { it.key != chosen.key }.none { checkNotNull(fx.row(it.key)).isTrashed })
+    }
+
+    @Test
+    fun deletingForever_asksTwice_ignoresADoubleTap_andOnlyDeletesTheSelected() {
+        val folder = "${fx.runId}_P"
+        val (doomed, spared) = (0 until 2).map { fx.seed("Pictures/$folder/", "${fx.runId}_$it.jpg", variant = it) }
+        listOf(doomed, spared).forEach { fx.trash(it.key, MediaKind.IMAGE) }
+        launch()
+        compose.onNodeWithText("Papelera").performClick()
+        // Lo recién mandado a la papelera vence último: queda al final de la grilla.
+        compose.waitUntil(10_000) { compose.onAllNodes(hasScrollAction()).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNode(hasScrollAction()).performScrollToNode(hasContentDescription(doomed.displayName))
+        compose.onNodeWithContentDescription(doomed.displayName).performClick()
+
+        // Cancelar en la pregunta final no borra nada.
+        compose.onNodeWithText("Borrar para siempre (1)").performClick()
+        compose.onNodeWithText("Continuar").performClick()
+        compose.onNodeWithText("Última confirmación").assertIsDisplayed()
+        compose.onNodeWithText("Cancelar").performClick()
+        // Un doble toque sobre "Continuar" tampoco.
+        compose.onNodeWithText("Borrar para siempre (1)").performClick()
+        compose.onNodeWithText("Continuar").performClick()
+        compose.onNodeWithText("Borrar definitivamente").performClick()
+        Thread.sleep(1_500)
+        listOf(doomed, spared).forEach { assertTrue("${it.displayName} sigue en la papelera", checkNotNull(fx.row(it.key)).isTrashed) }
+
+        // Con la pregunta leída, se borra solo la elegida.
+        waitUntilConfirmationIsReadable()
+        compose.onNodeWithText("Borrar definitivamente").performClick()
+        compose.waitUntil(20_000) { fx.row(doomed.key) == null }
+        val kept = checkNotNull(fx.row(spared.key)) { "la no elegida no debía borrarse" }
+        assertTrue("sigue en la papelera", kept.isTrashed)
+        assertEquals("con sus bytes", spared.sha256, fx.sha256(kept.path))
+    }
+
+    @Test
+    fun swiping_decidesLikeTapping_andAShortSwipeDecidesNothing() {
+        val folder = "${fx.runId}_W"
+        repeat(3) { fx.seed("Pictures/$folder/", "${fx.runId}_$it.jpg", variant = it) }
+        val order = deckOrder(folder)
+        openFolder(folder)
+
+        waitPastDoubleTapTimeout()
+        compose.onNodeWithTag("card").performTouchInput { swipeLeft(startX = centerX, endX = centerX - width * 0.1f) }
+        compose.waitForIdle()
+        Thread.sleep(500)
+        assertTrue("un deslizamiento corto no decide", staged().isEmpty())
+
+        compose.onNodeWithTag("card").performTouchInput { swipeLeft() }
+        compose.waitUntil(5_000) { staged().size == 1 }
+        assertEquals(Action.TRASH to order[0], lastStaged())
+
+        waitPastDoubleTapTimeout()
+        compose.onNodeWithTag("card").performTouchInput { swipeRight() }
+        compose.waitUntil(5_000) { staged().size == 2 }
+        assertEquals(Action.KEEP to order[1], lastStaged())
     }
 }

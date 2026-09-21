@@ -179,4 +179,20 @@ class ReviewSessionTest {
         assertTrue(dao.rows.isEmpty())
         assertEquals(listOf(1L, 2L), deckIds())
     }
+
+    @Test
+    fun undo_ofAFavoriteWhoseOriginalIsInTheTrash_undoesItButDoesNotBringItBack() = runTest {
+        val fromAnotherApp = item(7).copy(relativePath = "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/")
+        session.load(listOf(fromAnotherApp))
+        decideFront(Action.FAVORITOS)
+        // Otra app lo mandó a la papelera (o una copia quedó a medias): no se sabe si hay copia.
+        remote[fromAnotherApp.key] = fromAnotherApp.copy(isTrashed = true)
+
+        val undone = checkNotNull(session.undo())
+
+        assertFalse("no vuelve al mazo algo que está en la papelera", undone.backInDeck)
+        assertTrue("se avisa que está en la papelera", undone.inTrash)
+        assertTrue("la decisión se deshace: no se da por aplicada", dao.rows.isEmpty())
+        assertTrue(deckIds().isEmpty())
+    }
 }

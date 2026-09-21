@@ -1,5 +1,6 @@
 package com.imagesorter
 
+import android.Manifest
 import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.ContentValues
@@ -13,11 +14,24 @@ import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.uiautomator.By
+import androidx.test.uiautomator.UiDevice
 import com.imagesorter.data.MediaQueries
 import com.imagesorter.domain.MediaKey
 import com.imagesorter.domain.MediaKind
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.regex.Pattern
+import kotlin.concurrent.thread
+
+/** Permisos de lectura según la versión: Android 13+ los separa por tipo; antes era uno solo. */
+fun mediaPermissions(): Array<String> =
+    if (Build.VERSION.SDK_INT >= 33) {
+        arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.ACCESS_MEDIA_LOCATION)
+    } else {
+        arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.ACCESS_MEDIA_LOCATION)
+    }
 
 /**
  * Crea fotos de prueba A TRAVÉS DEL SHELL, así su dueño es el shell y no la app: los tests pasan
@@ -53,8 +67,46 @@ class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
     fun isEmulator(): Boolean =
         Build.HARDWARE == "ranchu" || Build.HARDWARE == "goldfish" || sh("getprop ro.boot.qemu").trim() == "1"
 
+    /**
+     * Android 12+: concede o quita "Gestión de multimedia" (el sistema deja de preguntar).
+     * Android 11 no la tiene y el sistema pregunta siempre: con [allow] se aprueba solo el diálogo de
+     * MediaProvider, que es lo que haría el usuario; sin él, el test maneja el diálogo por su cuenta.
+     */
     fun setManageMedia(allow: Boolean) {
-        sh("appops set ${context.packageName} MANAGE_MEDIA ${if (allow) "allow" else "default"}")
+        if (Build.VERSION.SDK_INT >= 31) {
+            sh("appops set ${context.packageName} MANAGE_MEDIA ${if (allow) "allow" else "default"}")
+            return
+        }
+        stopAutoApprover()
+        if (!allow) return
+        val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+        val allowButton = By.pkg(Pattern.compile(".*providers\\.media.*")).res("android", "button1")
+        val running = AtomicBoolean(true)
+        approverRunning = running
+        autoApprover = thread(isDaemon = true, name = "aprobar-mediaprovider") {
+            // Una bandera y no la interrupción: UiAutomation.waitForIdle se traga las interrupciones.
+            while (running.get()) {
+                runCatching { device.findObject(allowButton)?.click() }
+                runCatching { Thread.sleep(250) }
+            }
+        }
+    }
+
+    companion object {
+        // Global y no por test: un test siguiente siempre puede detener el aprobador de uno anterior.
+        @Volatile private var approverRunning: AtomicBoolean? = null
+        @Volatile private var autoApprover: Thread? = null
+
+        private fun stopAutoApprover() {
+            approverRunning?.set(false)
+            autoApprover?.let {
+                it.interrupt()
+                it.join(15_000) // un findObject puede esperar hasta 10 s a que la UI esté quieta
+                check(!it.isAlive) { "el aprobador automático no se detuvo" }
+            }
+            autoApprover = null
+            approverRunning = null
+        }
     }
 
     /** JPEG distinto para cada [variant]; [padding] añade bytes para cambiar el tamaño. */
@@ -160,6 +212,31 @@ class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
         val pattern = path.substringAfterLast('/').replace(' ', '?')
         val out = sh("find $dir -maxdepth 1 -name $pattern -exec sha256sum {} ;")
         return out.lineSequence().firstOrNull { it.isNotBlank() }?.substringBefore(' ')
+    }
+
+    /** Manda algo a la papelera desde el shell, como haría la galería u otra app. */
+    fun trash(key: MediaKey, kind: MediaKind) {
+        val collection = if (kind == MediaKind.VIDEO) "video" else "images"
+        sh("content update --uri content://media/${key.volume}/$collection/media/${key.mediaId} --bind is_trashed:i:1")
+        waitFor("mandar a la papelera ${key.mediaId}") { row(key)?.takeIf { it.isTrashed } }
+    }
+
+    /** Saca algo de la papelera desde el shell, como haría la galería u otra app. */
+    fun untrash(key: MediaKey, kind: MediaKind) {
+        val collection = if (kind == MediaKind.VIDEO) "video" else "images"
+        sh("content update --uri content://media/${key.volume}/$collection/media/${key.mediaId} --bind is_trashed:i:0")
+        waitFor("sacar de la papelera ${key.mediaId}") { row(key)?.takeIf { !it.isTrashed } }
+    }
+
+    /** Reescribe el archivo desde el shell (como otra app) y espera a que MediaStore lo reindexe. */
+    fun rewrite(seeded: Seeded, variant: Int): String {
+        val bytes = if (isVideo(seeded.displayName)) fakeVideo(variant, size = 8192) else jpeg(variant, padding = 4096)
+        writeViaShell(seeded.path, bytes)
+        scan(seeded.path)
+        waitFor("reindexar ${seeded.displayName}") {
+            row(seeded.key)?.takeIf { it.values["_size"] == bytes.size.toString() }
+        }
+        return sha256(bytes)
     }
 
     /** Cuántos archivos hay en [absoluteDir] que empiezan por [prefix] (para detectar duplicados). */
