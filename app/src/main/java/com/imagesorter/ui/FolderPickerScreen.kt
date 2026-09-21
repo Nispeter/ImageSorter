@@ -151,7 +151,7 @@ fun FolderPickerScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (!access.manageMedia) {
+            if (!access.manageMedia && Permissions.supportsManageMedia) {
                 item {
                     Card {
                         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

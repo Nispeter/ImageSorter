@@ -10,6 +10,7 @@ import android.provider.MediaStore
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,6 +35,9 @@ object Permissions {
      */
     data class Status(val fullRead: Boolean, val partialRead: Boolean, val manageMedia: Boolean)
 
+    /** "Gestión de multimedia" existe desde Android 12; en Android 11 el sistema siempre pregunta. */
+    val supportsManageMedia: Boolean get() = Build.VERSION.SDK_INT >= 31
+
     fun status(context: Context): Status {
         fun granted(permission: String) =
             ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
@@ -44,7 +48,8 @@ object Permissions {
         }
         val partial = !full && Build.VERSION.SDK_INT >= 34 &&
             granted(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
-        return Status(full, partial, MediaStore.canManageMedia(context))
+        val manage = supportsManageMedia && MediaStore.canManageMedia(context)
+        return Status(full, partial, manage)
     }
 
     fun runtimeRequest(): Array<String> = buildList {
@@ -58,6 +63,7 @@ object Permissions {
         add(Manifest.permission.ACCESS_MEDIA_LOCATION)
     }.toTypedArray()
 
+    @RequiresApi(31)
     fun manageMediaSettings(context: Context) =
         Intent(Settings.ACTION_REQUEST_MANAGE_MEDIA, Uri.parse("package:${context.packageName}"))
 
