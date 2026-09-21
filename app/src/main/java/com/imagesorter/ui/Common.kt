@@ -1,5 +1,6 @@
 package com.imagesorter.ui
 
+import android.os.SystemClock
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -32,7 +33,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import coil.request.ImageRequest
 import com.imagesorter.data.MediaOps
+import com.imagesorter.domain.MediaItem
 import com.imagesorter.data.db.Decision
 import com.imagesorter.data.db.DecisionDao
 import com.imagesorter.domain.Action
@@ -40,23 +43,57 @@ import com.imagesorter.domain.Folders
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
-/** Botón "Confirmar (N)": muestra un resumen, pide confirmación y ejecuta las decisiones registradas. */
+/**
+ * Botón "Confirmar (N)": muestra un resumen y ejecuta las decisiones registradas. Si hay fotos o videos
+ * que van a la papelera, pide una SEGUNDA confirmación solo para eso antes de tocar nada.
+ */
 @Composable
 fun CommitBar(ops: MediaOps, dao: DecisionDao, onFinished: () -> Unit, modifier: Modifier = Modifier) {
     val stagedCount by remember(dao) { dao.observeStagedCount() }.collectAsState(initial = 0)
     val scope = rememberCoroutineScope()
     var summary by remember { mutableStateOf<List<Decision>?>(null) }
+    var confirmTrash by remember { mutableStateOf<List<Decision>?>(null) }
+    var loading by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<MediaOps.OpResult?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
 
+    /** Aplica exactamente lo que el usuario vio, aunque llegue otra decisión mientras tanto. */
+    fun apply(shown: List<Decision>) {
+        if (busy) return
+        busy = true
+        val upToSeq = shown.maxOf { it.seq }
+        scope.launch {
+            try {
+                result = ops.commitStaged(upToSeq)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                error = e.message ?: e.javaClass.simpleName
+            } finally {
+                busy = false
+                onFinished()
+            }
+        }
+    }
+
     Button(
-        onClick = { scope.launch { summary = dao.staged().takeIf { it.isNotEmpty() } } },
-        enabled = stagedCount > 0 && !busy,
+        onClick = {
+            if (loading || busy) return@Button
+            loading = true
+            scope.launch {
+                val staged = dao.staged()
+                loading = false
+                // Si mientras se consultaba ya empezó a aplicarse, no se abre otro resumen encima.
+                if (!busy) summary = staged.takeIf { it.isNotEmpty() }
+            }
+        },
+        enabled = stagedCount > 0 && !busy && !loading,
         modifier = modifier.fillMaxWidth(),
     ) { Text("Confirmar ($stagedCount)") }
 
     summary?.let { shown ->
+        val toTrash = shown.count { it.action == Action.TRASH }
         AlertDialog(
             onDismissRequest = { summary = null },
             title = { Text("¿Aplicar cambios?") },
@@ -64,24 +101,32 @@ fun CommitBar(ops: MediaOps, dao: DecisionDao, onFinished: () -> Unit, modifier:
             confirmButton = {
                 TextButton(onClick = {
                     summary = null
-                    busy = true
-                    // Solo se aplica lo que el resumen mostró, aunque llegue otra decisión mientras tanto.
-                    val upToSeq = shown.maxOf { it.seq }
-                    scope.launch {
-                        try {
-                            result = ops.commitStaged(upToSeq)
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            error = e.message ?: e.javaClass.simpleName
-                        } finally {
-                            busy = false
-                            onFinished()
-                        }
-                    }
-                }) { Text("Aplicar") }
+                    if (toTrash > 0) confirmTrash = shown else apply(shown)
+                }) { Text(if (toTrash > 0) "Continuar" else "Aplicar") }
             },
             dismissButton = { TextButton(onClick = { summary = null }) { Text("Cancelar") } },
+        )
+    }
+
+    confirmTrash?.let { shown ->
+        val toTrash = shown.count { it.action == Action.TRASH }
+        val confirm = afterShown {
+            confirmTrash = null
+            apply(shown)
+        }
+        AlertDialog(
+            onDismissRequest = { confirmTrash = null },
+            title = { Text("¿Mandar $toTrash a la papelera?") },
+            text = {
+                Text(
+                    "Esta es la última confirmación. Podrás recuperarlas desde Papelera durante unos 30 días, " +
+                        "después Android las borra solo.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = confirm) { Text("Sí, a la papelera", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmTrash = null }) { Text("Cancelar") } },
         )
     }
     if (busy) BusyDialog("Aplicando cambios…")
@@ -146,6 +191,30 @@ fun ErrorDialog(message: String, title: String = "Error", onDismiss: () -> Unit)
         text = { Text(message) },
     )
 }
+
+/** Lo mínimo que una confirmación destructiva está en pantalla antes de aceptar un toque. */
+const val CONFIRM_MIN_VISIBLE_MS = 800L
+
+/**
+ * Envuelve el botón que confirma algo destructivo: ignora toques durante [CONFIRM_MIN_VISIBLE_MS]. El botón
+ * queda donde estaba "Continuar", así que sin esto el segundo toque de un doble (o triple) toque en el
+ * diálogo anterior aceptaría este sin haberlo leído.
+ */
+@Composable
+fun afterShown(onClick: () -> Unit): () -> Unit {
+    val shownAt = remember { SystemClock.uptimeMillis() }
+    return { if (SystemClock.uptimeMillis() - shownAt >= CONFIRM_MIN_VISIBLE_MS) onClick() }
+}
+
+/**
+ * Petición de imagen cuya clave de caché incluye tamaño y fecha: si el archivo cambió, nunca se ve la
+ * versión vieja guardada en memoria (se decidiría sobre algo distinto de lo que muestra la pantalla).
+ */
+fun imageOf(context: android.content.Context, item: MediaItem): ImageRequest =
+    ImageRequest.Builder(context)
+        .data(MediaOps.uriOf(item))
+        .memoryCacheKey("${MediaOps.uriOf(item)}#${item.size}#${item.dateModified}")
+        .build()
 
 @Composable
 fun ActionButton(icon: ImageVector, label: String, enabled: Boolean = true, onClick: () -> Unit) {

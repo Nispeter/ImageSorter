@@ -45,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
@@ -71,6 +72,7 @@ fun TrashScreen(queries: MediaQueries, ops: MediaOps, onBack: () -> Unit) {
     var result by remember { mutableStateOf<MediaOps.OpResult?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf<List<MediaItem>?>(null) }
+    var confirmDeleteFinal by remember { mutableStateOf<List<MediaItem>?>(null) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(reload) {
@@ -170,10 +172,30 @@ fun TrashScreen(queries: MediaQueries, ops: MediaOps, onBack: () -> Unit) {
             confirmButton = {
                 TextButton(onClick = {
                     confirmDelete = null
-                    perform { ops.deleteForever(toDelete) }
-                }) { Text("Borrar para siempre", color = MaterialTheme.colorScheme.error) }
+                    confirmDeleteFinal = toDelete
+                }) { Text("Continuar", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancelar") } },
+        )
+    }
+
+    // Segunda confirmación: es lo único que no se puede deshacer en toda la app.
+    confirmDeleteFinal?.let { toDelete ->
+        val confirm = afterShown {
+            confirmDeleteFinal = null
+            perform { ops.deleteForever(toDelete) }
+        }
+        AlertDialog(
+            onDismissRequest = { confirmDeleteFinal = null },
+            title = { Text("Última confirmación") },
+            text = {
+                val what = if (toDelete.size == 1) "1 foto o video se borra" else "${toDelete.size} fotos o videos se borran"
+                Text("$what ahora del teléfono. No quedan en la papelera ni se pueden recuperar.")
+            },
+            confirmButton = {
+                TextButton(onClick = confirm) { Text("Borrar definitivamente", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDeleteFinal = null }) { Text("Cancelar") } },
         )
     }
     if (busy) BusyDialog("Procesando…")
@@ -190,7 +212,7 @@ private fun TrashCell(item: MediaItem, checked: Boolean, daysLeft: Int?, onToggl
             .toggleable(value = checked, role = Role.Checkbox, onValueChange = onToggle),
     ) {
         AsyncImage(
-            model = MediaOps.uriOf(item),
+            model = imageOf(LocalContext.current, item),
             contentDescription = item.displayName,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),

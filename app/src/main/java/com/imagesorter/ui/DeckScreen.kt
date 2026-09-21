@@ -53,7 +53,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.imageLoader
-import coil.request.ImageRequest
 import coil.size.Scale
 import coil.size.Size
 import com.imagesorter.data.MediaOps
@@ -123,7 +122,13 @@ fun DeckScreen(
         scope.launch {
             guarded {
                 val undone = session.undo()
-                if (undone != null && !undone.backInDeck) {
+                if (undone != null && undone.inTrash) {
+                    val copy = Folders.targetFor(undone.decision.action)
+                        ?.takeIf { Folders.isInsideAnotherApp(undone.decision.relativePath) }
+                        ?.let { " Si ya se había copiado, la copia está en $it." }.orEmpty()
+                    message = "Aviso" to "\"${undone.decision.displayName}\" está en la papelera, así que no vuelve al mazo. " +
+                        "Puedes restaurarla desde Papelera.$copy"
+                } else if (undone != null && !undone.backInDeck) {
                     val where = Folders.targetFor(undone.decision.action)
                         ?: "la papelera (puedes restaurarla desde Papelera)"
                     message = "Aviso" to "\"${undone.decision.displayName}\" ya estaba en $where, así que no vuelve al mazo."
@@ -192,8 +197,7 @@ fun DeckScreen(
             LaunchedEffect(cards.take(4).map { it.key }, cardSize) {
                 for (item in cards.drop(1).take(3)) {
                     context.imageLoader.enqueue(
-                        ImageRequest.Builder(context)
-                            .data(MediaOps.uriOf(item))
+                        imageOf(context, item).newBuilder()
                             .size(cardSize)
                             .scale(Scale.FIT)
                             .build(),
@@ -208,7 +212,7 @@ fun DeckScreen(
                     cards.getOrNull(1)?.let { next ->
                         key(next.key) {
                             AsyncImage(
-                                model = MediaOps.uriOf(next),
+                                model = imageOf(context, next),
                                 contentDescription = null,
                                 contentScale = ContentScale.Fit,
                                 modifier = Modifier.fillMaxSize(),
