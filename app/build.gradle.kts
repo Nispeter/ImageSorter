@@ -1,3 +1,10 @@
+import java.security.KeyStore
+import java.security.MessageDigest
+
+// Huella SHA-256 del certificado de todo lo publicado. Un APK de publicación sin firmar o con otra clave no
+// se genera: el build falla (ver checkPublishedKey).
+val publishedCertSha256 = "765373F46DC526776742C6F19CA17D6986F5CBEE51D2E72EDD1D3E3F59324014"
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -9,18 +16,44 @@ android {
     namespace = "com.imagesorter"
     compileSdk = 35
 
+    // La MISMA clave con la que se firmaron todas las versiones publicadas. Si cambiara, Android no
+    // dejaría actualizar encima: habría que desinstalar y se perderían las decisiones guardadas.
+    val publishedKeystore = file(
+        providers.gradleProperty("imagesorter.keystore")
+            .getOrElse("${System.getProperty("user.home")}/.android/debug.keystore"),
+    )
+    val publishedAlias = providers.gradleProperty("imagesorter.keyAlias").getOrElse("androiddebugkey")
+    val publishedPassword = providers.gradleProperty("imagesorter.keystorePassword").getOrElse("android")
+
     defaultConfig {
         applicationId = "com.imagesorter"
-        minSdk = 31
+        minSdk = 30
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.1.3"
+        versionCode = 6
+        versionName = "1.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        if (publishedKeystore.exists()) {
+            create("published") {
+                storeFile = publishedKeystore
+                storePassword = publishedPassword
+                keyAlias = publishedAlias
+                keyPassword = providers.gradleProperty("imagesorter.keyPassword").getOrElse("android")
+                // v2, igual que todas las versiones publicadas (Android 7+). v3 solo sirve para rotar la clave, y con él
+                // AGP deja de poner v2.
+                enableV2Signing = true
+                enableV3Signing = false
+            }
+        }
     }
 
     buildTypes {
         release {
+            // Sin minificar: el APK publicado se comporta igual al probado, sin reglas de R8 que revisar.
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("published")
         }
     }
 
@@ -37,6 +70,26 @@ android {
         compose = true
     }
 }
+
+val checkPublishedKey by tasks.registering {
+    // "Generar APK firmado" de Android Studio inyecta otra clave y saltaría esta comprobación.
+    val injected = providers.gradleProperty("android.injected.signing.store.file")
+    doLast {
+        if (injected.isPresent) throw GradleException("No se publica con una clave inyectada (${injected.get()}): usa assembleRelease")
+        val keystore = android.signingConfigs.findByName("published")?.storeFile
+            ?: throw GradleException("Falta la clave de publicación (~/.android/debug.keystore o imagesorter.keystore)")
+        val password = (android.signingConfigs.getByName("published").storePassword ?: "").toCharArray()
+        val alias = android.signingConfigs.getByName("published").keyAlias
+        val cert = KeyStore.getInstance(keystore, password).getCertificate(alias)
+            ?: throw GradleException("La clave de publicación no tiene el alias $alias")
+        val sha = MessageDigest.getInstance("SHA-256").digest(cert.encoded)
+            .joinToString("") { "%02X".format(it) }
+        if (sha != publishedCertSha256) {
+            throw GradleException("La clave de publicación no es la de siempre ($sha): no se podría actualizar encima")
+        }
+    }
+}
+tasks.matching { it.name == "packageRelease" || it.name == "signReleaseBundle" }.configureEach { dependsOn(checkPublishedKey) }
 
 dependencies {
     implementation(libs.androidx.core.ktx)
