@@ -27,6 +27,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -40,8 +41,10 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
@@ -49,14 +52,22 @@ import com.imagesorter.data.MediaOps
 import com.imagesorter.domain.MediaItem
 import com.imagesorter.domain.MediaKind
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 /**
  * Foto o video al frente del mazo. Tocar la mitad izquierda o deslizar a la izquierda = borrar; la mitad
  * derecha o deslizar a la derecha = conservar. Un deslizamiento corto vuelve a su lugar sin decidir.
  * Los videos se reproducen solos aquí mismo; el botón central los pausa o reanuda.
+ * @param swipeThreshold cuánto hay que deslizar para decidir, como fracción del ancho.
  */
 @Composable
-fun MediaCard(item: MediaItem, onTapLeft: () -> Unit, onTapRight: () -> Unit, modifier: Modifier = Modifier) {
+fun MediaCard(
+    item: MediaItem,
+    onTapLeft: () -> Unit,
+    onTapRight: () -> Unit,
+    modifier: Modifier = Modifier,
+    swipeThreshold: Float = SwipeSettings.DEFAULT,
+) {
     // Los videos se reproducen solos al aparecer; el botón los pausa.
     var playing by remember(item.key) { mutableStateOf(item.kind == MediaKind.VIDEO) }
 
@@ -64,6 +75,7 @@ fun MediaCard(item: MediaItem, onTapLeft: () -> Unit, onTapRight: () -> Unit, mo
     val onRight by rememberUpdatedState(onTapRight)
     val offsetX = remember(item.key) { Animatable(0f) }
     val scope = rememberCoroutineScope()
+    var cardWidth by remember { mutableFloatStateOf(1f) }
 
     Box(
         modifier
@@ -73,8 +85,9 @@ fun MediaCard(item: MediaItem, onTapLeft: () -> Unit, onTapRight: () -> Unit, mo
                 rotationZ = offsetX.value / 60f
             }
             // Deslizar: los toques siguen yendo a las zonas de abajo; solo un arrastre horizontal llega aquí.
-            .pointerInput(item.key) {
-                val threshold = size.width * 0.3f
+            .onSizeChanged { cardWidth = it.width.toFloat().coerceAtLeast(1f) }
+            .pointerInput(item.key, swipeThreshold) {
+                val threshold = size.width * swipeThreshold
                 detectHorizontalDragGestures(
                     onDragEnd = {
                         val x = offsetX.value
@@ -126,6 +139,26 @@ fun MediaCard(item: MediaItem, onTapLeft: () -> Unit, onTapRight: () -> Unit, mo
         Row(Modifier.fillMaxSize()) {
             TapZone(Icons.Filled.Delete, "Borrar", Alignment.BottomStart, Modifier.weight(1f).testTag("tap-left"), onTapLeft)
             TapZone(Icons.Filled.Check, "Conservar", Alignment.BottomEnd, Modifier.weight(1f).testTag("tap-right"), onTapRight)
+        }
+
+        // Mientras se desliza: color y texto de lo que pasará al soltar. Llega a su máximo justo donde soltar decide.
+        val progress = (offsetX.value / (cardWidth * swipeThreshold)).coerceIn(-1f, 1f)
+        if (progress != 0f) {
+            val deleting = progress < 0f
+            val strength = abs(progress)
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .background((if (deleting) Color(0xFFD32F2F) else Color(0xFF2E7D32)).copy(alpha = 0.5f * strength)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    if (deleting) "BORRAR" else "CONSERVAR",
+                    color = Color.White.copy(alpha = strength),
+                    style = MaterialTheme.typography.headlineLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
         }
 
         if (item.kind == MediaKind.VIDEO) {
