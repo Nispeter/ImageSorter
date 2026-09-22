@@ -6,6 +6,8 @@ import android.app.Instrumentation
 import android.content.Intent
 import android.net.Uri
 import android.view.ViewConfiguration
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.core.content.IntentCompat
 import androidx.compose.ui.test.assertIsEnabled
@@ -20,6 +22,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
@@ -38,6 +41,7 @@ import com.imagesorter.domain.MediaKey
 import com.imagesorter.domain.MediaKind
 import com.imagesorter.ui.CONFIRM_MIN_VISIBLE_MS
 import com.imagesorter.ui.MainActivity
+import com.imagesorter.ui.SwipeSettings
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -68,6 +72,7 @@ class DeckUiTest {
     fun setUp() {
         assumeTrue("Solo en emulador", fx.isEmulator())
         active = true
+        SwipeSettings.save(fx.context, SwipeSettings.DEFAULT)
         fx.setManageMedia(true)
         db.clearAllTables()
     }
@@ -80,6 +85,7 @@ class DeckUiTest {
             db.clearAllTables()
             fx.cleanup()
         } finally {
+            SwipeSettings.save(fx.context, SwipeSettings.DEFAULT)
             fx.setManageMedia(false)
         }
     }
@@ -386,5 +392,40 @@ class DeckUiTest {
         compose.onNodeWithTag("card").performTouchInput { swipeRight() }
         compose.waitUntil(5_000) { staged().size == 2 }
         assertEquals(Action.KEEP to order[1], lastStaged())
+    }
+
+    @Test
+    fun theSwipeDistanceSetting_changesHowFarYouSwipe_andTheCardShowsWhatWillHappen() {
+        val folder = "${fx.runId}_Z"
+        repeat(2) { fx.seed("Pictures/$folder/", "${fx.runId}_$it.jpg", variant = it) }
+        val order = deckOrder(folder)
+        SwipeSettings.save(fx.context, SwipeSettings.MAX) // 50 %
+        openFolder(folder)
+        waitPastDoubleTapTimeout()
+
+        // Mientras se arrastra se ve qué pasará al soltar; con 50 %, soltar al 35 % no decide nada.
+        compose.onNodeWithTag("card").performTouchInput {
+            down(center)
+            moveBy(Offset(-width * 0.35f, 0f))
+        }
+        compose.onNodeWithText("BORRAR").assertIsDisplayed()
+        compose.onNodeWithTag("card").performTouchInput { moveBy(Offset(width * 0.7f, 0f)) }
+        compose.onNodeWithText("CONSERVAR").assertIsDisplayed()
+        compose.onNodeWithTag("card").performTouchInput { up() }
+        compose.waitForIdle()
+        Thread.sleep(500)
+        assertTrue("soltar antes de la distancia elegida no decide", staged().isEmpty())
+
+        // Se baja la distancia al 20 % desde Ajustes: ahora el mismo 35 % sí decide.
+        compose.onNodeWithContentDescription("Ajustes").performClick()
+        compose.onNodeWithTag("swipe-slider").performSemanticsAction(SemanticsActions.SetProgress) { it(0.2f) }
+        compose.onNodeWithText("Cuánto hay que deslizar la foto para decidir: 20% del ancho.").assertIsDisplayed()
+        compose.onNodeWithText("Listo").performClick()
+        assertEquals("se guarda", 0.2f, SwipeSettings.load(fx.context), 0.001f)
+
+        waitPastDoubleTapTimeout()
+        compose.onNodeWithTag("card").performTouchInput { swipeLeft(startX = centerX, endX = centerX - width * 0.35f) }
+        compose.waitUntil(5_000) { staged().size == 1 }
+        assertEquals(Action.TRASH to order[0], lastStaged())
     }
 }
