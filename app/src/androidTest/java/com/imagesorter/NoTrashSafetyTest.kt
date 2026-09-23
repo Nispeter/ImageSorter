@@ -12,10 +12,12 @@ import com.imagesorter.data.db.DecisionDao
 import com.imagesorter.domain.Action
 import com.imagesorter.domain.FolderIndex
 import com.imagesorter.domain.Folders
+import com.imagesorter.domain.MediaKind
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -98,6 +100,78 @@ class NoTrashSafetyTest {
         assertEquals("${s.displayName} bytes intactos tras mover", s.sha256, fx.sha256(row.path))
         assertNull("ya no debe estar en el origen", fx.sha256(s.path))
         return row
+    }
+
+    /** Todas las fotos y videos del teléfono (no solo los de prueba). */
+    private fun countEverything(): Int = MediaKind.entries.sumOf { kind ->
+        checkNotNull(resolver.query(MediaQueries.collection(kind, MediaStore.VOLUME_EXTERNAL), arrayOf(MediaStore.MediaColumns._ID), null, null, null))
+            .use { it.count }
+    }
+
+    @Test
+    fun onlyTheAddressOfASinglePhotoOrVideoCanBeDeleted() {
+        val s = seed(dirA, 1).single()
+        assertTrue(MediaOps.isItemUri(MediaOps.uriOf(s.key, MediaKind.IMAGE)))
+        assertTrue(MediaOps.isItemUri(MediaOps.uriOf(s.key, MediaKind.VIDEO)))
+        listOf(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL),
+            MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL, s.key.mediaId),
+            MediaQueries.collection(MediaKind.IMAGE, s.key.volume),
+            android.net.Uri.parse("content://media/external_primary/images/media/0"),
+            android.net.Uri.parse("content://media/external_primary/images/media/-1"),
+            android.net.Uri.parse("content://otra.app/external_primary/images/media/${s.key.mediaId}"),
+        ).forEach { assertFalse("no debe poder borrarse: $it", MediaOps.isItemUri(it)) }
+    }
+
+    @Test
+    fun deletesExactlyWhatWasConfirmed_andNothingElseOnThePhone() {
+        val inA = seed(dirA, 20)
+        val inB = seed("DCIM/${fx.runId}_B/", 6, from = 100)
+        val doomed = inA.filterIndexed { i, _ -> i % 3 == 0 } + inB.take(2)
+        val kept = inA.filterIndexed { i, _ -> i % 3 == 1 }
+        doomed.forEach { stage(it, Action.TRASH) }
+        kept.forEach { stage(it, Action.KEEP) }
+        val before = countEverything()
+
+        val result = blocking { ops.commitStaged() }
+
+        assertEquals(MediaOps.OpResult(doomed.size + kept.size, emptyList(), cancelled = false), result)
+        assertEquals("se borraron exactamente ${doomed.size} en todo el teléfono", before - doomed.size, countEverything())
+        doomed.forEach { assertDeleted(it) }
+        (inA + inB - doomed.toSet()).forEach { assertUntouched(it) }
+    }
+
+    @Test
+    fun onlyWhatTheSummaryShowed_isDeleted_notWhatWasDecidedAfterwards() {
+        val (shown, later) = seed(dirA, 2)
+        stage(shown, Action.TRASH)
+        val upToSeq = blocking { dao.staged() }.maxOf { it.seq }
+        stage(later, Action.TRASH) // llega mientras el resumen está en pantalla
+
+        val result = blocking { ops.commitStaged(upToSeq) }
+
+        assertEquals(MediaOps.OpResult(1, emptyList(), cancelled = false), result)
+        assertDeleted(shown)
+        assertUntouched(later)
+        assertEquals("sigue pendiente, sin ejecutar", listOf(later.key), blocking { dao.staged() }.map { it.key() })
+    }
+
+    @Test
+    fun aFileAlreadyInTheTarget_isNeverTouchedByTheVerifiedCopy() {
+        val name = "${fx.runId}_same.jpg"
+        val existing = fx.seed(Folders.FAVORITOS, name, variant = 40)
+        val fromWhatsapp = fx.seed("Android/media/com.whatsapp/WhatsApp/Media/${fx.runId}_WA/", name, variant = 41)
+        stage(fromWhatsapp, Action.FAVORITOS)
+
+        val result = blocking { ops.commitStaged() }
+
+        assertEquals(MediaOps.OpResult(1, emptyList(), cancelled = false), result)
+        assertUntouched(existing)
+        assertDeleted(fromWhatsapp)
+        val base = name.substringBeforeLast('.')
+        assertEquals("la existente y la copia", 2, fx.countFiles("/storage/emulated/0/${Folders.FAVORITOS}".trimEnd('/'), base))
     }
 
     @Test

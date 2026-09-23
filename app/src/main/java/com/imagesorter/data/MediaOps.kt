@@ -211,7 +211,7 @@ class MediaOps(
                         CommitPlanner.changed(d, original) -> {
                             // Sigue ahí pero ya no es lo que el usuario vio: no se toca, y su copia sobra.
                             copies.remove(d.key())?.let { copy ->
-                                withContext(NonCancellable + Dispatchers.IO) { runCatching { resolver.delete(copy, null, null) } }
+                                withContext(NonCancellable + Dispatchers.IO) { runCatching { deleteItem(copy) } }
                             }
                             dao.delete(d.volume, d.mediaId)
                             failures += Failure(d.displayName, "cambió mientras se copiaba; no se tocó el original")
@@ -246,7 +246,7 @@ class MediaOps(
                     } else {
                         // El sistema ya respondió y el original sigue intacto: la copia es nuestra y sobra.
                         copies.remove(d.key())
-                        withContext(NonCancellable + Dispatchers.IO) { runCatching { resolver.delete(copyUri, null, null) } }
+                        withContext(NonCancellable + Dispatchers.IO) { runCatching { deleteItem(copyUri) } }
                         if (approved) {
                             dao.delete(d.volume, d.mediaId)
                             val reason = if (hasSystemTrash) "no se movió a la papelera" else "no se pudo borrar el original"
@@ -267,7 +267,7 @@ class MediaOps(
                     for ((key, copy) in unrequested) {
                         val original = originals?.get(key)
                         if (original != null && !original.isTrashed) {
-                            runCatching { resolver.delete(copy, null, null) }
+                            runCatching { deleteItem(copy) }
                         } else {
                             runCatching { resolver.update(copy, ContentValues().apply { put(MediaColumns.IS_PENDING, 0) }, null, null) }
                         }
@@ -308,7 +308,7 @@ class MediaOps(
             check(sourceHash == copyHash) { "la copia no coincide con el original" }
             return copy
         } catch (e: Exception) {
-            runCatching { resolver.delete(copy, null, null) } // no dejar copias a medias
+            runCatching { deleteItem(copy) } // no dejar copias a medias
             throw e
         }
     }
@@ -336,7 +336,7 @@ class MediaOps(
                 published += d
             } else {
                 copies.remove(d.key())
-                runCatching { resolver.delete(copy, null, null) }
+                runCatching { deleteItem(copy) }
                 dao.delete(d.volume, d.mediaId)
                 failures += Failure(d.displayName, "la copia no quedó bien; el original no se tocó")
             }
@@ -412,8 +412,19 @@ class MediaOps(
      */
     private suspend fun discard(uris: List<Uri>): Boolean {
         if (hasSystemTrash) return approve(MediaStore.createTrashRequest(resolver, uris, true))
-        io { for (uri in uris) runCatching { resolver.delete(uri, null, null) } }
+        // Se revisan TODAS antes de borrar la primera: ante una sola dirección rara no se borra nada.
+        check(uris.all(::isItemUri)) { "dirección de foto inválida; no se borró nada" }
+        io { for (uri in uris) runCatching { deleteItem(uri) } }
         return true
+    }
+
+    /**
+     * Único borrado directo de la app. Solo acepta la dirección de UNA foto o video: con acceso "legacy" (Android 10)
+     * un delete sobre la colección entera borraría toda la galería.
+     */
+    private fun deleteItem(uri: Uri): Int {
+        check(isItemUri(uri)) { "no se borra algo que no es una sola foto o video: $uri" }
+        return resolver.delete(uri, null, null)
     }
 
     /**
@@ -483,6 +494,14 @@ class MediaOps(
             ContentUris.withAppendedId(MediaQueries.collection(kind, key.volume), key.mediaId)
 
         fun uriOf(item: MediaItem): Uri = uriOf(item.key, item.kind)
+
+        /** content://media/<volumen>/(images|video)/media/<id>, con id > 0. Nada más puede borrarse. */
+        fun isItemUri(uri: Uri): Boolean {
+            val segments = uri.pathSegments
+            return uri.scheme == ContentResolver.SCHEME_CONTENT && uri.authority == MediaStore.AUTHORITY &&
+                segments.size == 4 && segments[1] in setOf("images", "video") && segments[2] == "media" &&
+                (segments[3].toLongOrNull() ?: 0) > 0
+        }
 
         private fun InputStream.copyHashing(out: OutputStream): String {
             val digest = MessageDigest.getInstance("SHA-256")

@@ -23,6 +23,16 @@ class ArchitectureTest {
         }
     }
 
+    /** En Android 10 un delete directo sobre la colección borraría toda la galería: todo pasa por deleteItem. */
+    @Test
+    fun theOnlyDirectDeleteIsDeleteItem_whichChecksItIsASinglePhoto() {
+        val ops = sources.entries.single { it.key.endsWith("/data/MediaOps.kt") }.value
+        val deletes = Regex("""resolver\s*\.\s*delete\s*\(""").findAll(ops).toList()
+        assertEquals("un solo resolver.delete en MediaOps", 1, deletes.size)
+        val body = ops.substringAfter("private fun deleteItem(uri: Uri): Int {").substringBefore("\n    }")
+        assertTrue("deleteItem comprueba la dirección antes de borrar", body.indexOf("check(isItemUri(uri))") in 0 until body.indexOf("resolver.delete"))
+    }
+
     @Test
     fun onlyMediaOpsModifiesMediaStore() {
         // MediaOps también inserta/borra/escribe: es la copia verificada para carpetas de otras apps.

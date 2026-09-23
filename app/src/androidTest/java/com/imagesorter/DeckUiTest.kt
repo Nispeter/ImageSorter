@@ -368,8 +368,15 @@ class DeckUiTest {
         seeds.forEach { s -> assertEquals("nada se borra sin la segunda confirmación", s.sha256, fx.sha256(s.path)) }
         assertEquals("la decisión sigue guardada", 1, staged().size)
 
+        // Un doble toque: el segundo cae donde estaba "Continuar" y no debe borrar nada.
         compose.onNodeWithText("Confirmar (1)").performClick()
         compose.onNodeWithText("Continuar").performClick()
+        compose.onNodeWithText("Sí, borrar para siempre").performClick()
+        Thread.sleep(1_500)
+        seeds.forEach { s -> assertEquals("un doble toque no borra", s.sha256, fx.sha256(s.path)) }
+        assertEquals(1, staged().size)
+
+        // Leída la pregunta, sí se borra.
         waitUntilConfirmationIsReadable()
         compose.onNodeWithText("Sí, borrar para siempre").performClick()
         compose.waitUntil(20_000) { fx.row(chosen.key) == null }
