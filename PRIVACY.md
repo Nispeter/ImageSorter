@@ -42,4 +42,4 @@ La app no está dirigida a niños y no recopila datos de nadie.
 ## Cambios y contacto
 
 Si esta política cambia, se actualizará en esta página. Para dudas, abre un _issue_ en
-https://github.com/Nispeter/ImageSorter/issues.
+https://github.com/Nispeter/Peakselect/issues.
