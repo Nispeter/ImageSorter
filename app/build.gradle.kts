@@ -27,7 +27,7 @@ android {
 
     defaultConfig {
         applicationId = "com.imagesorter"
-        minSdk = 30
+        minSdk = 29
         targetSdk = 36
         versionCode = 7
         versionName = "1.2.1"

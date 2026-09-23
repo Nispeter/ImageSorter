@@ -45,7 +45,8 @@ import kotlinx.coroutines.launch
 
 /**
  * Botón "Confirmar (N)": muestra un resumen y ejecuta las decisiones registradas. Si hay fotos o videos
- * que van a la papelera, pide una SEGUNDA confirmación solo para eso antes de tocar nada.
+ * que van a la papelera, pide una SEGUNDA confirmación solo para eso antes de tocar nada. En Android 10 (sin
+ * papelera) esa confirmación avisa que se borran para siempre.
  */
 @Composable
 fun CommitBar(ops: MediaOps, dao: DecisionDao, onFinished: () -> Unit, modifier: Modifier = Modifier) {
@@ -116,15 +117,25 @@ fun CommitBar(ops: MediaOps, dao: DecisionDao, onFinished: () -> Unit, modifier:
         }
         AlertDialog(
             onDismissRequest = { confirmTrash = null },
-            title = { Text("¿Mandar $toTrash a la papelera?") },
+            title = { Text(if (MediaOps.hasSystemTrash) "¿Mandar $toTrash a la papelera?" else "¿Borrar $toTrash para siempre?") },
             text = {
                 Text(
-                    "Esta es la última confirmación. Podrás recuperarlas desde Papelera durante unos 30 días, " +
-                        "después Android las borra solo.",
+                    if (MediaOps.hasSystemTrash) {
+                        "Esta es la última confirmación. Podrás recuperarlas desde Papelera durante unos 30 días, " +
+                            "después Android las borra solo."
+                    } else {
+                        "Esta es la última confirmación. Android 10 no tiene papelera: se borran al instante y NO se " +
+                            "podrán recuperar."
+                    },
                 )
             },
             confirmButton = {
-                TextButton(onClick = confirm) { Text("Sí, a la papelera", color = MaterialTheme.colorScheme.error) }
+                TextButton(onClick = confirm) {
+                    Text(
+                        if (MediaOps.hasSystemTrash) "Sí, a la papelera" else "Sí, borrar para siempre",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             },
             dismissButton = { TextButton(onClick = { confirmTrash = null }) { Text("Cancelar") } },
         )
@@ -135,7 +146,9 @@ fun CommitBar(ops: MediaOps, dao: DecisionDao, onFinished: () -> Unit, modifier:
 }
 
 private fun describe(counts: Map<Action, Int>) = buildString {
-    counts[Action.TRASH]?.let { appendLine("$it a la papelera (recuperables ~30 días)") }
+    counts[Action.TRASH]?.let {
+        appendLine(if (MediaOps.hasSystemTrash) "$it a la papelera (recuperables ~30 días)" else "$it se borrarán para siempre")
+    }
     counts[Action.FAVORITOS]?.let { appendLine("$it a ${Folders.FAVORITOS}") }
     counts[Action.LIKED]?.let { appendLine("$it a ${Folders.LIKED}") }
     counts[Action.KEEP]?.let { appendLine("$it conservadas") }

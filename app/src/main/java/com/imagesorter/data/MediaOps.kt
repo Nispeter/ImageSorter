@@ -5,8 +5,10 @@ import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.ContentValues
 import android.net.Uri
+import android.os.Build
 import android.provider.MediaStore
 import android.provider.MediaStore.MediaColumns
+import androidx.annotation.ChecksSdkIntAtLeast
 import com.imagesorter.data.db.Decision
 import com.imagesorter.data.db.DecisionDao
 import com.imagesorter.domain.Action
@@ -39,6 +41,9 @@ import java.security.MessageDigest
  * Si el usuario cancela, no se sigue con más lotes y lo no verificado queda como estaba.
  * Lo de volúmenes desconectados (tarjeta, USB) no se toca ni se da por inexistente.
  * Cada lote contiene un solo tipo (fotos o videos).
+ *
+ * Android 10 no tiene papelera ni solicitudes por lotes ([hasSystemTrash]): ahí la app, con acceso "legacy",
+ * BORRA para siempre y mueve sin diálogo. La UI avisa antes; la verificación posterior es la misma.
  */
 class MediaOps(
     private val resolver: ContentResolver,
@@ -97,16 +102,25 @@ class MediaOps(
         }
 
         for (batch in batchesByKind(plan.trash) { it.kind }) {
-            val approved = approve(MediaStore.createTrashRequest(resolver, batch.map { uriOf(it.key(), it.kind) }, true))
-            done += settle(batch, approved, failures, emptyMap()) { _, now -> Verifier.trashed(now) }
+            val approved = discard(batch.map { uriOf(it.key(), it.kind) })
+            done += settle(batch, approved, failures, emptyMap()) { _, now ->
+                if (hasSystemTrash) Verifier.trashed(now) else Verifier.deleted(now)
+            }
             if (!approved) return OpResult(done, failures, cancelled = true)
         }
 
-        val (toCopy, toMove) = plan.moves.partition { it.viaCopy }
+        // Android 10 no admite videos dentro de Pictures/: ni se intenta, y el video vuelve al mazo.
+        val (moves, videosOnAndroid10) = plan.moves.partition { hasSystemTrash || it.decision.kind != MediaKind.VIDEO }
+        for (m in videosOnAndroid10) {
+            dao.delete(m.decision.volume, m.decision.mediaId)
+            failures += Failure(m.decision.displayName, "Android 10 no permite guardar videos en ${m.target}; no se tocó")
+        }
+        val (toCopy, toMove) = moves.partition { it.viaCopy }
 
         for ((target, moves) in toMove.groupBy { it.target }) {
             for (batch in batchesByKind(moves.map { it.decision }) { it.kind }) {
-                val approved = approve(MediaStore.createWriteRequest(resolver, batch.map { uriOf(it.key(), it.kind) }))
+                val approved = !hasSystemTrash ||
+                    approve(MediaStore.createWriteRequest(resolver, batch.map { uriOf(it.key(), it.kind) }))
                 val errors = HashMap<MediaKey, String>()
                 if (approved) {
                     // El permiso de escritura vive con la Activity: mover inmediatamente.
@@ -209,7 +223,7 @@ class MediaOps(
                 if (fresh.isEmpty()) continue
                 // Antes de lanzar la solicitud: el diálogo puede aprobarse aunque después algo falle aquí.
                 fresh.forEach { requested += it.key() }
-                val approved = approve(MediaStore.createTrashRequest(resolver, fresh.map { uriOf(it.key(), it.kind) }, true))
+                val approved = discard(fresh.map { uriOf(it.key(), it.kind) })
                 val copyKeys = fresh.associate { it.key() to MediaKey(it.volume, ContentUris.parseId(copies.getValue(it.key()))) }
                 val now = io { queries.snapshot(fresh.map { it.key() } + copyKeys.values) }
                 for (d in fresh) {
@@ -221,7 +235,10 @@ class MediaOps(
                         if (Verifier.moved(d, targets.getValue(d.key()), now[copyKeys.getValue(d.key())]) == Outcome.Ok) {
                             dao.markDone(d.volume, d.mediaId)
                             done++
-                            if (original == null) failures += Failure(d.displayName, "el original ya no estaba; se conservó la copia")
+                            // En Android 10 que el original ya no esté es justamente el borrado pedido.
+                            if (original == null && hasSystemTrash) {
+                                failures += Failure(d.displayName, "el original ya no estaba; se conservó la copia")
+                            }
                         } else {
                             dao.delete(d.volume, d.mediaId)
                             failures += Failure(d.displayName, "la copia no quedó en su sitio; revisa la Papelera")
@@ -232,7 +249,8 @@ class MediaOps(
                         withContext(NonCancellable + Dispatchers.IO) { runCatching { resolver.delete(copyUri, null, null) } }
                         if (approved) {
                             dao.delete(d.volume, d.mediaId)
-                            failures += Failure(d.displayName, "no se movió a la papelera")
+                            val reason = if (hasSystemTrash) "no se movió a la papelera" else "no se pudo borrar el original"
+                            failures += Failure(d.displayName, reason)
                         }
                     }
                 }
@@ -330,6 +348,7 @@ class MediaOps(
     suspend fun restore(items: List<MediaItem>): OpResult = exclusive("Restaurar") { restoreNow(items) }
 
     private suspend fun restoreNow(items: List<MediaItem>): OpResult {
+        if (!hasSystemTrash) return OpResult(0, emptyList(), cancelled = false)
         val failures = mutableListOf<Failure>()
         var done = 0
         val available = onAttachedVolumes(items, failures, { it.volume }, { it.displayName })
@@ -358,6 +377,7 @@ class MediaOps(
         exclusive("Borrar para siempre") { deleteForeverNow(items) }
 
     private suspend fun deleteForeverNow(items: List<MediaItem>): OpResult {
+        if (!hasSystemTrash) return OpResult(0, emptyList(), cancelled = false)
         val failures = mutableListOf<Failure>()
         val available = onAttachedVolumes(items, failures, { it.volume }, { it.displayName })
         var done = 0
@@ -384,6 +404,16 @@ class MediaOps(
             if (!approved) return OpResult(done, failures, cancelled = true)
         }
         return OpResult(done, failures, cancelled = false)
+    }
+
+    /**
+     * Manda [uris] a la papelera del sistema y devuelve si el usuario aprobó. En Android 10 no hay papelera: se
+     * borran directamente (cuenta como aprobado). Lo que no se pudo borrar lo detecta la verificación posterior.
+     */
+    private suspend fun discard(uris: List<Uri>): Boolean {
+        if (hasSystemTrash) return approve(MediaStore.createTrashRequest(resolver, uris, true))
+        io { for (uri in uris) runCatching { resolver.delete(uri, null, null) } }
+        return true
     }
 
     /**
@@ -444,10 +474,13 @@ class MediaOps(
     private suspend fun <T> io(block: () -> T): T = withContext(Dispatchers.IO) { block() }
 
     companion object {
-        fun uriOf(key: MediaKey, kind: MediaKind): Uri = when (kind) {
-            MediaKind.IMAGE -> MediaStore.Images.Media.getContentUri(key.volume, key.mediaId)
-            MediaKind.VIDEO -> MediaStore.Video.Media.getContentUri(key.volume, key.mediaId)
-        }
+        /** Android 11+: papelera del sistema y solicitudes por lotes (papelera, escritura, borrado). */
+        @get:ChecksSdkIntAtLeast(api = 30)
+        val hasSystemTrash: Boolean get() = Build.VERSION.SDK_INT >= 30
+
+        // Igual que Media.getContentUri(volumen, id), que no existe en Android 10.
+        fun uriOf(key: MediaKey, kind: MediaKind): Uri =
+            ContentUris.withAppendedId(MediaQueries.collection(kind, key.volume), key.mediaId)
 
         fun uriOf(item: MediaItem): Uri = uriOf(item.key, item.kind)
 

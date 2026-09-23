@@ -25,12 +25,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.regex.Pattern
 import kotlin.concurrent.thread
 
-/** Permisos de lectura según la versión: Android 13+ los separa por tipo; antes era uno solo. */
+/** Permisos según la versión: Android 13+ separa la lectura por tipo; Android 10 además necesita escritura. */
 fun mediaPermissions(): Array<String> =
     if (Build.VERSION.SDK_INT >= 33) {
         arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.ACCESS_MEDIA_LOCATION)
     } else {
-        arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.ACCESS_MEDIA_LOCATION)
+        listOfNotNull(
+            Manifest.permission.READ_EXTERNAL_STORAGE,
+            if (Build.VERSION.SDK_INT < 30) Manifest.permission.WRITE_EXTERNAL_STORAGE else null,
+            Manifest.permission.ACCESS_MEDIA_LOCATION,
+        ).toTypedArray()
     }
 
 /**
@@ -54,7 +58,8 @@ class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
         val path get() = values.getValue("_data")
         val displayName get() = values.getValue("_display_name")
         val relativePath get() = values.getValue("relative_path")
-        val isTrashed get() = values.getValue("is_trashed") == "1"
+        /** Android 10 no tiene papelera ni la columna is_trashed. */
+        val isTrashed get() = values["is_trashed"] == "1"
         val dateExpires get() = values["date_expires"]?.toLongOrNull()
         val owner get() = values["owner_package_name"]
     }
@@ -132,14 +137,25 @@ class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
     }
 
     fun scan(path: String) {
-        sh("content call --uri content://media --method scan_file --arg $path")
+        if (Build.VERSION.SDK_INT >= 30) {
+            sh("content call --uri content://media --method scan_file --arg $path")
+        } else {
+            // Android 10 no acepta scan_file desde el shell; el aviso al escáner sí.
+            sh("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://$path")
+        }
     }
 
     /** Crea la foto y espera a que MediaStore la indexe con su tamaño final. */
     private fun isVideo(name: String) = name.endsWith(".mp4")
 
-    /** Bytes distintos por [variant] con extensión .mp4: MediaStore lo indexa como video aunque no se reproduzca. */
-    fun fakeVideo(variant: Int, size: Int = 4096): ByteArray = ByteArray(size) { ((it * 31) xor variant).toByte() }
+    /**
+     * Bytes distintos por [variant] con extensión .mp4: MediaStore lo indexa como video aunque no se reproduzca.
+     * Empieza con una cabecera MP4 (ftyp): sin ella el escáner de Android 10 lo ignora.
+     */
+    fun fakeVideo(variant: Int, size: Int = 4096): ByteArray {
+        val ftyp = byteArrayOf(0, 0, 0, 0x18) + "ftypisom".toByteArray() + byteArrayOf(0, 0, 2, 0) + "isommp41".toByteArray()
+        return ftyp + ByteArray(size - ftyp.size) { ((it * 31) xor variant).toByte() }
+    }
 
     fun seed(relativePath: String, name: String, variant: Int, videoBytes: Int = 4096): Seeded {
         val bytes = if (isVideo(name)) fakeVideo(variant, videoBytes) else jpeg(variant)
@@ -193,10 +209,11 @@ class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
 
     /** Estado de la fila leído por el shell (incluye papelera). null si ya no existe. */
     fun row(key: MediaKey): Row? {
+        val trashed = if (Build.VERSION.SDK_INT >= 30) "is_trashed:" else ""
         for (collection in listOf("images", "video")) {
             val out = sh(
                 "content query --uri content://media/${key.volume}/$collection/media/${key.mediaId} " +
-                    "--projection _data:_display_name:relative_path:is_trashed:date_expires:owner_package_name:_size",
+                    "--projection _data:_display_name:relative_path:${trashed}date_expires:owner_package_name:_size",
             )
             val line = out.lineSequence().firstOrNull { it.startsWith("Row:") } ?: continue
             val body = line.substringAfter("Row:").trim().substringAfter(' ')
@@ -262,5 +279,8 @@ class MediaFixture(val runId: String = "IST_${System.currentTimeMillis()}") {
         val roots = "/storage/emulated/0/Pictures /storage/emulated/0/DCIM /storage/emulated/0/Movies $whatsapp"
         sh("find $roots -type f -name *$runId* -delete")
         sh("find $roots -depth -type d -name $runId* -empty -delete")
+        // Android 10 no se entera de lo que el shell borra: sin esto quedan filas de archivos que ya no existen.
+        // Sin espacios: executeShellCommand no respeta comillas.
+        if (Build.VERSION.SDK_INT < 30) sh("content delete --uri content://media/external/file --where instr(_data,'$runId')>0")
     }
 }

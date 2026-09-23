@@ -23,6 +23,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -138,7 +139,7 @@ fun FolderPickerScreen(
         topBar = {
             TopAppBar(
                 title = { Text("¿Qué quieres revisar?") },
-                actions = { TextButton(onClick = onOpenTrash) { Text("Papelera") } },
+                actions = { if (MediaOps.hasSystemTrash) TextButton(onClick = onOpenTrash) { Text("Papelera") } },
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },
@@ -151,6 +152,18 @@ fun FolderPickerScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            if (!MediaOps.hasSystemTrash) {
+                item {
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                        Text(
+                            "Android 10 no tiene papelera: lo que marques para borrar se elimina para siempre al " +
+                                "confirmar y no se puede recuperar.",
+                            Modifier.padding(16.dp),
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                    }
+                }
+            }
             if (!access.manageMedia && Permissions.supportsManageMedia) {
                 item {
                     Card {

@@ -72,6 +72,7 @@ class MediaSafetyTest {
     @Before
     fun setUp() {
         assumeTrue("Estos tests crean y borran fotos: solo se ejecutan en un emulador", fx.isEmulator())
+        assumeTrue("Usan la papelera del sistema (Android 11+); Android 10 está en NoTrashSafetyTest", MediaOps.hasSystemTrash)
         fx.setManageMedia(true)
         if (Build.VERSION.SDK_INT >= 31) assertTrue("MANAGE_MEDIA no quedó concedido", MediaStore.canManageMedia(fx.context))
         db = Room.inMemoryDatabaseBuilder(fx.context, AppDatabase::class.java).build()

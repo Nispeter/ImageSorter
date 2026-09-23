@@ -29,7 +29,8 @@ import androidx.core.content.ContextCompat
 
 object Permissions {
     /**
-     * @param fullRead acceso a TODAS las fotos (requisito para usar la app).
+     * @param fullRead acceso a TODAS las fotos (requisito para usar la app). En Android 10 incluye escritura:
+     *   sin ella la app no puede borrar ni mover.
      * @param partialRead Android 14+: el usuario eligió solo algunas fotos.
      * @param manageMedia "Gestión de multimedia": el sistema no pide confirmación en cada lote.
      */
@@ -44,7 +45,8 @@ object Permissions {
         val full = if (Build.VERSION.SDK_INT >= 33) {
             granted(Manifest.permission.READ_MEDIA_IMAGES) && granted(Manifest.permission.READ_MEDIA_VIDEO)
         } else {
-            granted(Manifest.permission.READ_EXTERNAL_STORAGE)
+            granted(Manifest.permission.READ_EXTERNAL_STORAGE) &&
+                (Build.VERSION.SDK_INT >= 30 || granted(Manifest.permission.WRITE_EXTERNAL_STORAGE))
         }
         val partial = !full && Build.VERSION.SDK_INT >= 34 &&
             granted(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
@@ -58,6 +60,7 @@ object Permissions {
             add(Manifest.permission.READ_MEDIA_VIDEO)
         } else {
             add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            if (Build.VERSION.SDK_INT < 30) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
         if (Build.VERSION.SDK_INT >= 34) add(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
         add(Manifest.permission.ACCESS_MEDIA_LOCATION)

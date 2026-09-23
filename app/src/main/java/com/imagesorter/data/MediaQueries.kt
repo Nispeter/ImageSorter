@@ -2,6 +2,7 @@ package com.imagesorter.data
 
 import android.content.ContentResolver
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.MediaStore.Images
@@ -15,6 +16,7 @@ import com.imagesorter.domain.MediaKind
 /**
  * Consultas de SOLO LECTURA a MediaStore, sobre fotos y videos.
  * Nunca filtra por owner_package_name (Android 14+ lo recorta a propias).
+ * Android 10 no tiene papelera: ahí nada figura como "en la papelera" (ver [MediaOps.hasSystemTrash]).
  */
 class MediaQueries(private val resolver: ContentResolver) {
 
@@ -52,7 +54,7 @@ class MediaQueries(private val resolver: ContentResolver) {
     }
 
     /** Toda la papelera de fotos y videos del sistema (de cualquier app); primero lo que vence antes. */
-    fun trash(): List<MediaItem> = MediaKind.entries.flatMap { kind ->
+    fun trash(): List<MediaItem> = if (!MediaOps.hasSystemTrash) emptyList() else MediaKind.entries.flatMap { kind ->
         queryItems(collection(kind, MediaStore.VOLUME_EXTERNAL), kind, Bundle().apply {
             putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_ONLY)
         })
@@ -75,6 +77,7 @@ class MediaQueries(private val resolver: ContentResolver) {
                         ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,
                         chunk.map { it.mediaId.toString() }.toTypedArray(),
                     )
+                    // Constante copiada al compilar: Android 10 simplemente la ignora (no hay papelera).
                     putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE)
                 }
                 for (kind in MediaKind.entries) {
@@ -96,7 +99,7 @@ class MediaQueries(private val resolver: ContentResolver) {
             val path = c.getColumnIndexOrThrow(MediaColumns.RELATIVE_PATH)
             val size = c.getColumnIndexOrThrow(MediaColumns.SIZE)
             val modified = c.getColumnIndexOrThrow(MediaColumns.DATE_MODIFIED)
-            val trashed = c.getColumnIndexOrThrow(MediaColumns.IS_TRASHED)
+            val trashed = if (MediaOps.hasSystemTrash) c.getColumnIndexOrThrow(MediaColumns.IS_TRASHED) else -1
             val pending = c.getColumnIndexOrThrow(MediaColumns.IS_PENDING)
             val expires = c.getColumnIndexOrThrow(MediaColumns.DATE_EXPIRES)
             val bucket = c.getColumnIndexOrThrow(MediaColumns.BUCKET_ID)
@@ -110,7 +113,7 @@ class MediaQueries(private val resolver: ContentResolver) {
                     relativePath = c.getString(path) ?: "",
                     size = c.getLong(size),
                     dateModified = c.getLong(modified),
-                    isTrashed = c.getInt(trashed) == 1,
+                    isTrashed = trashed >= 0 && c.getInt(trashed) == 1,
                     isPending = c.getInt(pending) == 1,
                     dateExpires = if (c.isNull(expires)) null else c.getLong(expires),
                     kind = kind,
@@ -137,19 +140,20 @@ class MediaQueries(private val resolver: ContentResolver) {
             MediaColumns.DATE_ADDED,
         )
 
-        private val PROJECTION = arrayOf(
+        // IS_TRASHED no existe en Android 10: pedirla hace fallar la consulta.
+        private val PROJECTION = listOfNotNull(
             MediaColumns._ID,
             MediaColumns.VOLUME_NAME,
             MediaColumns.DISPLAY_NAME,
             MediaColumns.RELATIVE_PATH,
             MediaColumns.SIZE,
             MediaColumns.DATE_MODIFIED,
-            MediaColumns.IS_TRASHED,
+            if (Build.VERSION.SDK_INT >= 30) MediaColumns.IS_TRASHED else null,
             MediaColumns.IS_PENDING,
             MediaColumns.DATE_EXPIRES,
             MediaColumns.BUCKET_ID,
             MediaColumns.DATE_ADDED,
             MediaColumns.DATE_TAKEN,
-        )
+        ).toTypedArray()
     }
 }

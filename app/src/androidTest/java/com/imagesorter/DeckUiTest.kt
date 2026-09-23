@@ -47,6 +47,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
@@ -302,6 +303,7 @@ class DeckUiTest {
 
     @Test
     fun sendingToTheTrash_asksTwice_andCancellingTheSecondQuestionChangesNothing() {
+        assumeTrue("Papelera del sistema: Android 11+", MediaOps.hasSystemTrash)
         val folder = "${fx.runId}_T"
         val seeds = (0 until 2).map { fx.seed("Pictures/$folder/", "${fx.runId}_$it.jpg", variant = it) }
         val order = deckOrder(folder)
@@ -339,7 +341,45 @@ class DeckUiTest {
     }
 
     @Test
+    fun onAndroid10_warnsThereIsNoTrash_andDeletingAsksTwiceSayingItIsForever() {
+        assumeTrue("Solo Android 10 (sin papelera del sistema)", !MediaOps.hasSystemTrash)
+        val folder = "${fx.runId}_T"
+        val seeds = (0 until 2).map { fx.seed("Pictures/$folder/", "${fx.runId}_$it.jpg", variant = it) }
+        val order = deckOrder(folder)
+        val chosen = seeds.single { it.key == order[0] }
+
+        launch()
+        compose.onNodeWithText("Android 10 no tiene papelera", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Papelera").assertDoesNotExist()
+        scenario?.close()
+
+        openFolder(folder)
+        waitPastDoubleTapTimeout()
+        compose.onNodeWithTag("tap-left").performClick()
+        compose.waitUntil(5_000) { staged().size == 1 }
+
+        compose.onNodeWithText("Confirmar (1)").performClick()
+        compose.onNodeWithText("1 se borrarán para siempre").assertIsDisplayed()
+        compose.onNodeWithText("Continuar").performClick()
+        compose.onNodeWithText("¿Borrar 1 para siempre?").assertIsDisplayed()
+        compose.onNodeWithText("Cancelar").performClick()
+        compose.waitForIdle()
+        Thread.sleep(1_500)
+        seeds.forEach { s -> assertEquals("nada se borra sin la segunda confirmación", s.sha256, fx.sha256(s.path)) }
+        assertEquals("la decisión sigue guardada", 1, staged().size)
+
+        compose.onNodeWithText("Confirmar (1)").performClick()
+        compose.onNodeWithText("Continuar").performClick()
+        waitUntilConfirmationIsReadable()
+        compose.onNodeWithText("Sí, borrar para siempre").performClick()
+        compose.waitUntil(20_000) { fx.row(chosen.key) == null }
+        assertNull("borrada del disco", fx.sha256(chosen.path))
+        seeds.filter { it.key != chosen.key }.forEach { assertEquals("solo se borró la elegida", it.sha256, fx.sha256(it.path)) }
+    }
+
+    @Test
     fun deletingForever_asksTwice_ignoresADoubleTap_andOnlyDeletesTheSelected() {
+        assumeTrue("Papelera del sistema: Android 11+", MediaOps.hasSystemTrash)
         val folder = "${fx.runId}_P"
         val (doomed, spared) = (0 until 2).map { fx.seed("Pictures/$folder/", "${fx.runId}_$it.jpg", variant = it) }
         listOf(doomed, spared).forEach { fx.trash(it.key, MediaKind.IMAGE) }
