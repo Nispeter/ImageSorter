@@ -14,7 +14,7 @@ plugins {
 
 android {
     namespace = "com.imagesorter"
-    compileSdk = 35
+    compileSdk = 36
 
     // La MISMA clave con la que se firmaron todas las versiones publicadas. Si cambiara, Android no
     // dejaría actualizar encima: habría que desinstalar y se perderían las decisiones guardadas.
@@ -28,7 +28,7 @@ android {
     defaultConfig {
         applicationId = "com.imagesorter"
         minSdk = 30
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 7
         versionName = "1.2.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
