@@ -22,7 +22,7 @@ Estos datos se guardan solo dentro de la app, no se incluyen en copias de seguri
 
 | Permiso | Para qué |
 |---|---|
-| Fotos y videos (`READ_MEDIA_IMAGES`, `READ_MEDIA_VIDEO`, `READ_EXTERNAL_STORAGE` en Android 11–12) | Mostrar las fotos y videos para que decidas qué hacer con ellos. Es la función principal de la app. |
+| Fotos y videos (`READ_MEDIA_IMAGES`, `READ_MEDIA_VIDEO`, `READ_EXTERNAL_STORAGE` en Android 10–12) | Mostrar las fotos y videos para que decidas qué hacer con ellos. Es la función principal de la app. |
 | Ubicación de las fotos (`ACCESS_MEDIA_LOCATION`) | Conservar los datos de ubicación de la foto al moverla a otra carpeta. La app no lee ni muestra la ubicación. |
 | Almacenamiento (`WRITE_EXTERNAL_STORAGE`, solo Android 10) | Borrar y mover las fotos que confirmes. Android 10 no tiene otra forma de hacerlo. |
 | Gestión de multimedia (`MANAGE_MEDIA`, opcional) | Mover fotos a la papelera o a otra carpeta sin que el sistema pida confirmación en cada lote. Se concede en Ajustes y se puede quitar cuando quieras. |
