@@ -1,13 +1,13 @@
-# Política de privacidad de ImageSorter
+# Política de privacidad de Peakselect
 
 _Última actualización: 23 de septiembre de 2026_
 
-ImageSorter es una app para ordenar las fotos y videos del teléfono: el usuario decide cuáles conservar, cuáles
+Peakselect es una app para ordenar las fotos y videos del teléfono: el usuario decide cuáles conservar, cuáles
 mandar a la papelera y cuáles mover a Favoritos o Liked.
 
 ## Datos que recopila
 
-**Ninguno.** ImageSorter no tiene permiso de acceso a Internet: no envía fotos, videos, datos de uso, identificadores
+**Ninguno.** Peakselect no tiene permiso de acceso a Internet: no envía fotos, videos, datos de uso, identificadores
 ni ninguna otra información fuera del teléfono. No incluye publicidad, analíticas ni servicios de terceros.
 
 ## Datos que guarda en el teléfono

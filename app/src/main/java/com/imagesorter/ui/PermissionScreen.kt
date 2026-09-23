@@ -83,7 +83,7 @@ fun PermissionScreen(status: Permissions.Status, onResult: () -> Unit) {
         Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
     ) {
-        Text("ImageSorter necesita acceso a tus fotos y videos", style = MaterialTheme.typography.headlineSmall)
+        Text("Peakselect necesita acceso a tus fotos y videos", style = MaterialTheme.typography.headlineSmall)
         Text("Permite el acceso a TODAS las fotos y videos para revisarlos. Nada se mueve ni se borra hasta que pulses Confirmar.")
         if (status.partialRead) {
             Text(
