@@ -26,7 +26,7 @@ android {
     val publishedPassword = providers.gradleProperty("imagesorter.keystorePassword").getOrElse("android")
 
     defaultConfig {
-        applicationId = "com.imagesorter"
+        applicationId = "io.github.nispeter.peakselect"
         minSdk = 29
         targetSdk = 36
         versionCode = 8

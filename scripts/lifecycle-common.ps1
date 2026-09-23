@@ -2,7 +2,7 @@
 # crean fotos, las mandan a la papelera, las restauran y desinstalan la app.
 . "$PSScriptRoot\env.ps1"
 $ProjectRoot = (Resolve-Path "$PSScriptRoot\..").Path
-$TestRunner = 'com.imagesorter.test/androidx.test.runner.AndroidJUnitRunner'
+$TestRunner = 'io.github.nispeter.peakselect.test/androidx.test.runner.AndroidJUnitRunner'
 $TestClass = 'com.imagesorter.LifecycleSafetyTest'
 
 # Guarda: un único dispositivo destino y que sea un emulador (nunca un teléfono real).

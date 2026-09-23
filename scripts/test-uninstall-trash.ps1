@@ -12,8 +12,8 @@ $volume = $Matches[1]
 $id = $Matches[2]
 
 Write-Host '2) Desinstalar la app'
-adb uninstall com.imagesorter | Out-Host
-if ("$(adb shell pm path com.imagesorter)".Trim()) { throw 'La app sigue instalada: la desinstalación falló' }
+adb uninstall io.github.nispeter.peakselect | Out-Host
+if ("$(adb shell pm path io.github.nispeter.peakselect)".Trim()) { throw 'La app sigue instalada: la desinstalación falló' }
 
 Write-Host '3) Comprobar desde el shell que la foto sigue en la papelera e intacta'
 $row = (adb shell content query --uri "content://media/$volume/images/media/$id" --projection is_trashed:_data) -join ' '

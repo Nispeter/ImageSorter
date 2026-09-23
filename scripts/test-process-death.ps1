@@ -8,7 +8,7 @@ $s = Invoke-Step 'stageThenDie' @('-e', 'runId', $runId)
 if (-not $s.sha0 -or -not $s.sha1) { throw 'El paso 1 no reportó las fotos' }
 
 Write-Host '2) Matar el proceso de la app'
-adb shell am force-stop com.imagesorter
+adb shell am force-stop io.github.nispeter.peakselect
 
 Write-Host '3) Reabrir la app y verificar'
 Invoke-Step 'afterRestartQueuePersistsAndNothingExecuted' @('-e', 'runId', $runId, '-e', 'sha0', $s.sha0, '-e', 'sha1', $s.sha1) | Out-Null
