@@ -1,38 +1,61 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Una foto y debajo las dos decisiones: ✕ borrar (izquierda) y ✓ conservar (derecha). Dentro de la zona segura (66dp). -->
+<!-- Una foto algo ladeada con un gato partido al medio: rojo con ojo ✕ (borrar) y verde con ojo de corazón
+     (conservar), boca :3. Dentro de la zona segura (66dp). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:pathData="M42,26h24a4,4 0,0 1,4 4v24a4,4 0,0 1,-4 4h-24a4,4 0,0 1,-4 -4v-24a4,4 0,0 1,4 -4z"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="3.5" />
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M47,35m-3,0a3,3 0,1 0,6 0a3,3 0,1 0,-6 0" />
-    <path
-        android:pathData="M41,53L48.5,45.5L55,52L59.5,47.5L67,55"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="3.5"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round" />
-    <path
-        android:fillColor="#FFE06C62"
-        android:pathData="M43,72m-9,0a9,9 0,1 0,18 0a9,9 0,1 0,-18 0" />
-    <path
-        android:pathData="M39.5,68.5L46.5,75.5M46.5,68.5L39.5,75.5"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="3"
-        android:strokeLineCap="round" />
-    <path
-        android:fillColor="#FF5DB075"
-        android:pathData="M65,72m-9,0a9,9 0,1 0,18 0a9,9 0,1 0,-18 0" />
-    <path
-        android:pathData="M60.5,72.5L63.8,75.6L69.5,68.8"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="3"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round" />
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:rotation="-8">
+        <!-- Fondo de la foto: mitad roja, mitad verde. -->
+        <path
+            android:fillColor="#8CE06C62"
+            android:pathData="M54,31H37a6,6 0,0 0,-6 6v34a6,6 0,0 0,6 6h17z" />
+        <path
+            android:fillColor="#8C5DB075"
+            android:pathData="M54,31h17a6,6 0,0 1,6 6v34a6,6 0,0 1,-6 6h-17z" />
+        <!-- Cara del gato, partida igual. -->
+        <path
+            android:fillColor="#FFE06C62"
+            android:pathData="M54,46A13.5,11.5 0,0 0,50 46.52L42.8,39.5L42,52.23A13.5,11.5 0,0 0,54 69z" />
+        <path
+            android:fillColor="#FF5DB075"
+            android:pathData="M54,46A13.5,11.5 0,0 1,58 46.52L65.2,39.5L66,52.23A13.5,11.5 0,0 1,54 69z" />
+        <path
+            android:pathData="M42,52.23L42.8,39.5L50,46.52A13.5,11.5 0,0 1,58 46.52L65.2,39.5L66,52.23A13.5,11.5 0,1 1,42 52.23z"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineJoin="round" />
+        <!-- Marco de la foto. -->
+        <path
+            android:pathData="M37,31h34a6,6 0,0 1,6 6v34a6,6 0,0 1,-6 6h-34a6,6 0,0 1,-6 -6v-34a6,6 0,0 1,6 -6z"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2" />
+        <!-- Ojo ✕ del lado rojo. -->
+        <path
+            android:pathData="M45.2,53.2L49.8,57.8M49.8,53.2L45.2,57.8"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2"
+            android:strokeLineCap="round" />
+        <!-- Ojo de corazón del lado verde. -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M60.5,58.4L57.6,55.5A1.7,1.7 0,1 1,60.5 54.3A1.7,1.7 0,1 1,63.4 55.5Z" />
+        <!-- Nariz y boca :3. -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M52.8,59.8H55.2L54,61.1Z"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="1"
+            android:strokeLineJoin="round" />
+        <path
+            android:pathData="M50.2,62.2A1.9,1.9 0,0 0,54 62.2A1.9,1.9 0,0 0,57.8 62.2"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="1.5"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+    </group>
 </vector>
