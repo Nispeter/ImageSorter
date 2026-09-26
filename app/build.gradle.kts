@@ -1,9 +1,9 @@
 import java.security.KeyStore
 import java.security.MessageDigest
 
-// Huella SHA-256 del certificado de todo lo publicado. Un APK de publicación sin firmar o con otra clave no
-// se genera: el build falla (ver checkPublishedKey).
-val publishedCertSha256 = "765373F46DC526776742C6F19CA17D6986F5CBEE51D2E72EDD1D3E3F59324014"
+// Huella SHA-256 del certificado de la clave de subida a Play. Un paquete de publicación sin firmar o con otra
+// clave no se genera: el build falla (ver checkPublishedKey).
+val publishedCertSha256 = "655FFA802C0B16B3CF208FE118984DC67E448271972EFFBC1C9082D3AF81C372"
 
 plugins {
     alias(libs.plugins.android.application)
@@ -16,14 +16,12 @@ android {
     namespace = "com.imagesorter"
     compileSdk = 36
 
-    // La MISMA clave con la que se firmaron todas las versiones publicadas. Si cambiara, Android no
-    // dejaría actualizar encima: habría que desinstalar y se perderían las decisiones guardadas.
-    val publishedKeystore = file(
-        providers.gradleProperty("imagesorter.keystore")
-            .getOrElse("${System.getProperty("user.home")}/.android/debug.keystore"),
-    )
-    val publishedAlias = providers.gradleProperty("imagesorter.keyAlias").getOrElse("androiddebugkey")
-    val publishedPassword = providers.gradleProperty("imagesorter.keystorePassword").getOrElse("android")
+    // La clave de subida a Play (Play App Signing firma con la suya lo que se instala). Play rechaza lo firmado con
+    // otra, y la de debug nunca la acepta. Vive fuera del repo: imagesorter.keystore, .keyAlias, .keystorePassword y
+    // .keyPassword van en el gradle.properties del Gradle home.
+    val publishedKeystore = providers.gradleProperty("imagesorter.keystore").orNull?.let { file(it) }
+    val publishedAlias = providers.gradleProperty("imagesorter.keyAlias").orNull
+    val publishedPassword = providers.gradleProperty("imagesorter.keystorePassword").orNull
 
     defaultConfig {
         applicationId = "io.github.nispeter.peakselect"
@@ -35,12 +33,12 @@ android {
     }
 
     signingConfigs {
-        if (publishedKeystore.exists()) {
+        if (publishedKeystore?.exists() == true) {
             create("published") {
                 storeFile = publishedKeystore
                 storePassword = publishedPassword
                 keyAlias = publishedAlias
-                keyPassword = providers.gradleProperty("imagesorter.keyPassword").getOrElse("android")
+                keyPassword = providers.gradleProperty("imagesorter.keyPassword").orNull
                 // v2, igual que todas las versiones publicadas (Android 7+). v3 solo sirve para rotar la clave, y con él
                 // AGP deja de poner v2.
                 enableV2Signing = true
@@ -75,9 +73,9 @@ val checkPublishedKey by tasks.registering {
     // "Generar APK firmado" de Android Studio inyecta otra clave y saltaría esta comprobación.
     val injected = providers.gradleProperty("android.injected.signing.store.file")
     doLast {
-        if (injected.isPresent) throw GradleException("No se publica con una clave inyectada (${injected.get()}): usa assembleRelease")
+        if (injected.isPresent) throw GradleException("No se publica con una clave inyectada (${injected.get()}): usa bundleRelease")
         val keystore = android.signingConfigs.findByName("published")?.storeFile
-            ?: throw GradleException("Falta la clave de publicación (~/.android/debug.keystore o imagesorter.keystore)")
+            ?: throw GradleException("Falta la clave de subida (imagesorter.keystore en el gradle.properties del Gradle home)")
         val password = (android.signingConfigs.getByName("published").storePassword ?: "").toCharArray()
         val alias = android.signingConfigs.getByName("published").keyAlias
         val cert = KeyStore.getInstance(keystore, password).getCertificate(alias)
@@ -85,7 +83,7 @@ val checkPublishedKey by tasks.registering {
         val sha = MessageDigest.getInstance("SHA-256").digest(cert.encoded)
             .joinToString("") { "%02X".format(it) }
         if (sha != publishedCertSha256) {
-            throw GradleException("La clave de publicación no es la de siempre ($sha): no se podría actualizar encima")
+            throw GradleException("La clave de publicación no es la de subida a Play ($sha): Play rechazaría el paquete")
         }
     }
 }
