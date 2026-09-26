@@ -53,6 +53,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextAlign
@@ -258,11 +259,15 @@ fun DeckScreen(
     }
 }
 
+/** Play exige que la política de privacidad también se pueda abrir desde la app. */
+private const val PRIVACY_POLICY_URL = "https://github.com/Nispeter/Peakselect/blob/main/PRIVACY.md"
+
 @Composable
 private fun SwipeSettingsDialog(value: Float, onChange: (Float) -> Unit, onDismiss: () -> Unit) {
+    val uriHandler = LocalUriHandler.current
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Deslizar") },
+        title = { Text("Ajustes") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Cuánto hay que deslizar la foto para decidir: ${(value * 100).roundToInt()}% del ancho.")
@@ -278,6 +283,7 @@ private fun SwipeSettingsDialog(value: Float, onChange: (Float) -> Unit, onDismi
                     Text("Más", style = MaterialTheme.typography.labelSmall)
                 }
                 Text("Tocar cada mitad de la foto sigue funcionando igual.", style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = { uriHandler.openUri(PRIVACY_POLICY_URL) }) { Text("Política de privacidad") }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Listo") } },
